@@ -865,6 +865,89 @@ def append_last_line_to_file(source_path, target_file):
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 
+def summarize_coefficient_history(coefficient_path, avg_fraction=0.2, min_avg_rows=5):
+    """
+    Read an OpenFOAM forceCoeffs time history (coefficient.dat) and average
+    the last portion of it instead of just taking the final sample, which
+    can still carry solver oscillation/noise even after a long run.
+
+    Returns None if the file is missing/empty, otherwise a dict with:
+        last_time   -- the final time/iteration value reached
+        averaged    -- list of 12 floats (Cd, Cd(f), Cd(r), Cl, Cl(f), Cl(r),
+                        CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r)) averaged
+                        over the last `avg_fraction` of the run
+        converged   -- True if Cd and Cl look flat over the averaging window
+                        (first half vs second half differ by < 2%)
+        rel_change  -- the relative change behind that convergence check
+    """
+    try:
+        df = pd.read_csv(coefficient_path, comment='#', sep=r'\s+', header=None)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return None
+    if df.empty:
+        return None
+
+    n = len(df)
+    window = min(n, max(min_avg_rows, int(n * avg_fraction)))
+    tail = df.tail(window)
+
+    last_time = df.iloc[-1, 0]
+    averaged = tail.iloc[:, 1:].mean().tolist()
+
+    # Judge convergence on Cd (col 1) and Cl (col 4) only. The moment and
+    # side-force coefficients are routinely near-zero for a symmetric 2D
+    # case, where tiny absolute noise produces a huge, meaningless relative
+    # swing that would otherwise dominate the check.
+    half = max(1, window // 2)
+    primary_cols = [1, 4]
+    first_half_mean = tail.iloc[:half, primary_cols].mean()
+    second_half_mean = tail.iloc[-half:, primary_cols].mean()
+    # A coefficient counts as converged if it changed by < 2% relative, OR
+    # by less than an absolute tolerance -- at some angles Cd/Cl sit so
+    # close to zero that a tiny, physically negligible absolute wobble
+    # would otherwise read as a huge (meaningless) relative percentage.
+    # The reported rel_change is floored against that same tolerance so it
+    # stays a legible number instead of blowing up near a zero crossing.
+    abs_tolerance = 2e-3
+    abs_change = (second_half_mean - first_half_mean).abs()
+    rel_change = abs_change / second_half_mean.abs().clip(lower=abs_tolerance)
+    converged = bool(((rel_change < 0.02) | (abs_change < abs_tolerance)).all())
+
+    return {
+        "last_time": last_time,
+        "averaged": averaged,
+        "converged": converged,
+        "rel_change": float(rel_change.max()),
+    }
+
+
+def summarize_yplus(yplus_path, avg_fraction=0.2, min_avg_rows=5):
+    """
+    Read an OpenFOAM yPlus function-object output and average the last
+    portion of the run. Returns None if the file is missing/empty, otherwise
+    a dict with 'average' (mean of the 'average' column) and 'max' (peak of
+    the 'max' column) over the averaging window -- useful to sanity-check
+    that the boundary-layer mesh resolution matches the turbulence model's
+    wall-function assumptions.
+    """
+    try:
+        df = pd.read_csv(yplus_path, comment='#', sep=r'\s+', header=None,
+                          names=['Time', 'patch', 'min', 'max', 'average'])
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return None
+    if df.empty:
+        return None
+
+    n = len(df)
+    window = min(n, max(min_avg_rows, int(n * avg_fraction)))
+    tail = df.tail(window)
+
+    return {
+        "average": float(tail['average'].mean()),
+        "max": float(tail['max'].max()),
+    }
+
+
 def plot_data_from_txt(file_path, output_dir='graficos'):
     # Limpar a pasta de saída (se existir) antes de salvar novos gráficos
     if os.path.exists(output_dir):
@@ -876,6 +959,7 @@ def plot_data_from_txt(file_path, output_dir='graficos'):
 
     # Limpar e converter o índice
     data.index = data.index.str.extract(r'(-?\d+\.\d+|\d+)')[0].astype(float)
+    data = data.sort_index()
 
     # Criar um arquivo Excel e adicionar os dados
     excel_file_path = os.path.join(output_dir, 'data.xlsx')
@@ -890,21 +974,66 @@ def plot_data_from_txt(file_path, output_dir='graficos'):
         for alpha, row in data.iterrows():
             f.write(f"{alpha}\t" + '\t'.join(map(str, row.values)) + '\n')
 
+    # A coluna "Converged" é metadado de QA, não um coeficiente -- usada para
+    # marcar visualmente pontos possivelmente não convergidos nos gráficos,
+    # não plotada como uma variável própria.
+    converged_mask = data.pop('Converged').fillna(0).astype(bool) if 'Converged' in data.columns else pd.Series(True, index=data.index)
 
-    
+    plt.rcParams.update({
+        'figure.dpi': 130,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'axes.titlesize': 13,
+        'axes.titleweight': 'bold',
+        'axes.labelsize': 11,
+        'font.size': 10,
+    })
+    line_color = '#1f6fb2'
+    flag_color = '#d9534f'
+
+    def plot_with_convergence_flags(x, y, xlabel, ylabel, title, annotate_alpha=False):
+        plt.plot(x, y, marker='o', markersize=6, linewidth=1.8, color=line_color, zorder=2)
+        unconverged = ~converged_mask
+        if unconverged.any():
+            plt.scatter(x[unconverged], y[unconverged], marker='x', s=90, linewidths=2.2,
+                        color=flag_color, zorder=3, label='not fully converged')
+            plt.legend(loc='best', fontsize=9)
+        if annotate_alpha:
+            for alpha, xi, yi in zip(data.index, x, y):
+                plt.annotate(f'{alpha:g}°', (xi, yi), textcoords="offset points", xytext=(6, 4), fontsize=8)
+        plt.title(title)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.tight_layout()
+
     # Plotar um gráfico para cada coluna de dados e salvar como imagem
     for column in data.columns:
-        plt.figure(figsize=(10, 5))
-        plt.plot(data.index, data[column], marker='o', linestyle='-')
-        plt.title(f'Gráfico de {column} por Alpha')
-        plt.xlabel('alpha (graus)')
-        plt.ylabel(column)
-        plt.grid(True)
-        
-        # Salvar o gráfico como um arquivo de imagem
+        plt.figure(figsize=(8, 4.5))
+        if data[column].min() < 0 < data[column].max():
+            plt.axhline(0, color='gray', linewidth=0.8, linestyle='--', zorder=1)
+        plot_with_convergence_flags(data.index, data[column], 'alpha (deg)', column,
+                                     f'{column} vs. Angle of Attack')
         file_name = os.path.join(output_dir, f'{column.replace("(", "").replace(")", "").replace("/", "_")}.png')
         plt.savefig(file_name)
-        plt.close()  # Fechar a figura após salvar para liberar memória
+        plt.close()
+
+    # Gráficos derivados: polar de arrasto e eficiência aerodinâmica (Cl/Cd),
+    # os dois mais usados na análise de um perfil e que antes não existiam.
+    if 'Cl' in data.columns and 'Cd' in data.columns:
+        plt.figure(figsize=(6.5, 6))
+        plot_with_convergence_flags(data['Cd'], data['Cl'], 'Cd', 'Cl',
+                                     'Drag Polar (Cl vs. Cd)', annotate_alpha=True)
+        plt.savefig(os.path.join(output_dir, 'polar_Cl_Cd.png'))
+        plt.close()
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            efficiency = data['Cl'] / data['Cd']
+        plt.figure(figsize=(8, 4.5))
+        plt.axhline(0, color='gray', linewidth=0.8, linestyle='--', zorder=1)
+        plot_with_convergence_flags(data.index, efficiency, 'alpha (deg)', 'Cl / Cd',
+                                     'Aerodynamic Efficiency (Cl/Cd) vs. Angle of Attack')
+        plt.savefig(os.path.join(output_dir, 'efficiency_Cl_Cd.png'))
+        plt.close()
 
 
 

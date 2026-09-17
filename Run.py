@@ -692,7 +692,12 @@ class App:
             os.makedirs(vf_directory)
 
         with open(resultados_path, "w") as resultados_file:
-            resultados_file.write("# Angulo_n: Time\tCd\tCd(f)\tCd(r)\tCl\tCl(f)\tCl(r)\tCmPitch\tCmRoll\tCmYaw\tCs\tCs(f)\tCs(r)\n")
+            resultados_file.write(
+                "# Angulo_n: Time\tCd\tCd(f)\tCd(r)\tCl\tCl(f)\tCl(r)\tCmPitch\tCmRoll\tCmYaw\tCs\tCs(f)\tCs(r)\tyPlus_avg\tyPlus_max\tConverged\n"
+            )
+
+        # Número de colunas de dados esperadas (Time + 12 coeficientes + yPlus_avg + yPlus_max + Converged)
+        num_result_columns = 16
 
         with open(resultados_path, "a") as resultados_file:
             for angle in self.angles:
@@ -705,22 +710,23 @@ class App:
                 resultados_file.write(f"{angle_folder}: ")
 
                 coefficient_path = os.path.join(angle_directory_path, "postProcessing", "forceCoeffs", "0", "coefficient.dat")
+                yplus_path = os.path.join(angle_directory_path, "postProcessing", "yPlus", "0", "yPlus.dat")
 
-                # Número de colunas de dados esperadas (Time, Cd, Cd(f), Cd(r), Cl, Cl(f), Cl(r), CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r))
-                num_result_columns = 13
-                missing_data_row = "\t".join(["nan"] * num_result_columns) + "\n"
-
-                if os.path.isfile(coefficient_path):
-                    with open(coefficient_path, "r") as coeff_file:
-                        lines = coeff_file.readlines()
-                        if lines:
-                            resultados_file.write(lines[-1])
-                        else:
-                            print(f"Warning: {coefficient_path} is empty, skipping angle {angle}")
-                            resultados_file.write(missing_data_row)
-                else:
+                summary = functions.summarize_coefficient_history(coefficient_path)
+                if summary is None:
                     print(f"Warning: no results found for angle {angle} ({coefficient_path})")
-                    resultados_file.write(missing_data_row)
+                    resultados_file.write("\t".join(["nan"] * num_result_columns) + "\n")
+                    continue
+
+                if not summary["converged"]:
+                    print(f"Warning: angle {angle} may not be fully converged "
+                          f"({summary['rel_change'] * 100:.1f}% change over the averaging window)")
+
+                yplus = functions.summarize_yplus(yplus_path)
+                yplus_values = [yplus["average"], yplus["max"]] if yplus else [float("nan"), float("nan")]
+
+                row_values = [summary["last_time"]] + summary["averaged"] + yplus_values + [int(summary["converged"])]
+                resultados_file.write("\t".join(f"{v:.6e}" if isinstance(v, float) else str(v) for v in row_values) + "\n")
 
         functions.plot_data_from_txt(resultados_path)
 
