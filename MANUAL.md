@@ -14,6 +14,10 @@ started with OpenFOAM who wants a guided workflow.
 
 ![Main screen](docs/screenshot_main_menu.png)
 
+On launch, the app checks in the background whether WSL and OpenFOAM are
+actually installed, and shows a warning banner here if not (with the
+detected problem) instead of only failing once you try to run a simulation.
+
 | Field | Description |
 |---|---|
 | Airfoil coordinates file | Optional. Browse to a `.dat` file with airfoil `x y` coordinate pairs, one per line. If set, this overrides the NACA code below. |
@@ -48,9 +52,45 @@ Only shown if you picked **Custom Mesh**. Parameters are grouped as:
 The tail angle is automatically adjusted to match the angle of attack so the
 wake is captured correctly downstream of the airfoil.
 
-Click **Create Mesh** to continue.
+**Load Preset...** / **Save Preset...** — the main screen has a **Load
+Preset** button, and each flow-properties screen has a **Save Preset**
+button, to save/load the whole setup (airfoil, angles, mesh choice and its
+parameters, flow type and properties, parallel toggle) as a `.json` file.
+Loading one just fills in the values; step through the normal screens
+afterward to review and run it. Handy for repeating a setup or sharing one
+with someone else.
 
-## 3. Simulation type
+Click **Create Mesh** to continue — this opens the mesh preview below rather
+than jumping straight to the simulation type.
+
+## 3. Mesh Preview
+
+![Mesh preview](docs/screenshot_mesh_preview.png)
+
+Before any simulation runs, the app generates the mesh for real (`blockMesh`)
+and checks it (`checkMesh`) inside WSL, then shows:
+
+- A wireframe of the near-field mesh around the airfoil. Use the toolbar
+  under the plot to pan/zoom/reset the view — the full domain stretches many
+  chord lengths further out than what's shown by default.
+- Quality metrics: cell/point count, max/average non-orthogonality, max
+  skewness, and max aspect ratio, with an overall ✓ **Mesh OK** / ⚠ **Mesh
+  has warnings** status (mirroring `checkMesh`'s own pass/fail checks). Hover
+  the **ⓘ** next to any metric for what it means and which direction (higher
+  or lower) is actually better — the raw numbers alone don't tell you that.
+
+Because the mesh depends on the angle of attack (the tail is realigned to
+match it), if you entered more than one angle you can switch between them
+with the **Preview angle** selector at the top — each switch regenerates and
+re-checks the mesh for that angle.
+
+If the mesh doesn't look right, click **← Back** to return to the mesh
+parameters (standard mesh: back to the main screen; custom mesh: back to
+the parameter form, where anything you already typed is preserved) and
+adjust it — nothing has been simulated yet at this point. Otherwise, click
+**Continue →** to move on.
+
+## 4. Simulation type
 
 ![Choose the simulation type](docs/screenshot_choose_type.png)
 
@@ -59,7 +99,7 @@ Click **Create Mesh** to continue.
 - **Compressible** — for flows with significant density variation
   (high-speed / transonic cases).
 
-## 4. Flow properties
+## 5. Flow properties
 
 ### Incompressible
 
@@ -91,26 +131,59 @@ Click **Create Mesh** to continue.
 Toggle **Show advanced parameters** to reveal the secondary fields; they
 reset to their defaults automatically when hidden again.
 
+Toggle **Run angles in parallel** to solve multiple angles at once instead of
+one after another (off by default). Each angle already runs its own
+2-process OpenFOAM solve, so this multiplies CPU/RAM use accordingly — the
+app caps how many angles run at the same time (based on your CPU core count,
+capped at 4) rather than launching all of them simultaneously, but it's
+still meant for machines with some headroom. Leave it off if a sequential run
+already keeps your machine busy.
+
 Click **Run Simulation** to start. The app switches to a progress screen and
-runs each angle sequentially inside WSL, in a background thread so the
-window stays responsive.
+runs the angles inside WSL — sequentially or in parallel per the toggle
+above — in a background thread so the window stays responsive.
 
 ![Simulation progress](docs/screenshot_progress.png)
 
-When it finishes, you'll see a summary with a button to open the results
-folder directly.
+For a sequential run, the progress screen also plots Cd/Cl live as the
+solver iterates (read from the running case's `coefficient.dat` every few
+seconds), so you can see convergence happening instead of just a percentage.
+This is skipped for parallel runs to avoid adding more WSL polling on top of
+an already CPU-heavy run.
+
+When it finishes, you'll see a summary with buttons to open the results
+folder, or to **View Results** right inside the app — a plot picker plus the
+image, no need to leave the window. The main screen also gets a **View Last
+Results** shortcut once a run exists, so you can revisit it anytime.
 
 ![Simulation finished](docs/screenshot_complete.png)
 
-## 5. Results
+## 6. Results
 
-- `Resultados/resultados.txt` — one row per angle with `Time, Cd, Cd(f),
-  Cd(r), Cl, Cl(f), Cl(r), CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r)`. If a
-  simulation failed for a given angle, its row is filled with `nan` instead
-  of corrupting the file.
-- `graficos/data.xlsx` — the same data as a spreadsheet.
-- `graficos/*.png` — one plot per coefficient, coefficient vs. angle of
-  attack.
+Each coefficient is averaged over the last 20% of the solver's iterations
+(not just the final sample), which is less sensitive to residual solver
+noise. An angle is flagged as **not fully converged** if Cd or Cl still
+changed by more than ~2% (relative) or a small absolute tolerance across
+that averaging window — the underlying flow hadn't fully settled by the
+end of the run for that angle.
+
+- `Results/results.txt` — one row per angle with `Time, Cd, Cd(f), Cd(r),
+  Cl, Cl(f), Cl(r), CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r), yPlus_avg,
+  yPlus_max, Converged`. If a simulation failed for a given angle, its row
+  is filled with `nan` instead of corrupting the file.
+  - `yPlus_avg` / `yPlus_max` — average/peak y+ on the airfoil wall, a
+    mesh-quality check for the turbulence model's wall-function
+    assumptions (typically expect low tens to a few hundred).
+  - `Converged` — `1` if Cd/Cl settled within tolerance, `0` otherwise.
+- `plots/data.xlsx` — the same data as a spreadsheet.
+- `plots/*.png` — one plot per coefficient, coefficient vs. angle of
+  attack. Points where `Converged` is `0` are marked with a red ✕ instead
+  of the usual dot, so an unreliable value is never silently plotted like
+  any other point.
+- `plots/polar_Cl_Cd.png` — the drag polar (Cl vs. Cd), the standard way
+  to compare an airfoil's lift/drag trade-off across angles.
+- `plots/efficiency_Cl_Cd.png` — aerodynamic efficiency (Cl/Cd) vs. angle
+  of attack.
 
 ## Error messages
 
@@ -123,6 +196,10 @@ folder directly.
   Check the message for which angle failed and adjust the parameter.
 - **"WSL executable not found"** — WSL isn't installed or not on `PATH`; see
   [README.md](README.md) for setup steps.
+- **"Mesh generation failed" (on the Mesh Preview screen)** — `blockMesh`
+  itself failed inside WSL, usually from an invalid custom mesh parameter.
+  The panel on the right shows OpenFOAM's own error message; go **← Back**
+  and adjust the offending parameter.
 - **Simulation Finished with Errors** — one or more angles failed inside
   WSL. Check the console/terminal output the app was launched from for the
   underlying OpenFOAM error.
@@ -131,11 +208,11 @@ folder directly.
 
 - When specifying multiple angles, expect the total run time to scale with
   the number of angles — each is solved as an independent case.
-- Close `graficos/data.xlsx` before starting a new simulation; the app
+- Close `plots/data.xlsx` before starting a new simulation; the app
   rewrites it on every run and Excel keeps the file locked while open.
 - To change the number of solver iterations, edit `endTime` or `deltaT` in
-  the relevant case's `system/controlDict` under `Padrão/Incompressivel` or
-  `Padrão/Compressivel`.
+  the relevant case's `system/controlDict` under `Standard/Incompressible` or
+  `Standard/Compressible`.
 
 ## Citation
 

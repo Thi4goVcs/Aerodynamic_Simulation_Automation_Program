@@ -1,6 +1,9 @@
 import numpy as np
 import math
 import os
+import re
+import io
+import sys
 import pandas as pd
 import matplotlib
 # Backend não-interativo: plot_data_from_txt só salva PNGs em disco e pode ser
@@ -10,8 +13,12 @@ import matplotlib.pyplot as plt
 import shutil
 from openpyxl import Workbook
 
-# Obter o diretório do script em execução
-script_dir = os.path.dirname(__file__)
+# Diretório base do app. Quando empacotado com PyInstaller (--onefile),
+# __file__ aponta para dentro do diretório temporário _MEIPASS, não para o
+# .exe real -- nesse caso os arquivos de runtime (Results/, Simulations/,
+# plots/, etc.) devem ficar ao lado do .exe, não em uma pasta temporária.
+script_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+    else os.path.dirname(os.path.abspath(__file__))
 
 # Alterar o diretório atual para o diretório do script
 os.chdir(script_dir)
@@ -174,7 +181,7 @@ def blockMeshDirect(Alpha):
         I17 = np.log(O24) / np.log(H17)
 
         # Abrir o arquivo para escrita
-        fid = open('mesh_padrao', 'w')
+        fid = open('mesh_standard', 'w')
 
         # Verificar se o arquivo foi aberto com sucesso
         if fid == -1:
@@ -509,7 +516,7 @@ def blockMeshDirect_Custom(alpha, distance_to_inlet, distance_to_outlet,cell_siz
         I17 = np.log(O24) / np.log(H17)
 
         # Abrir o arquivo para escrita
-        fid = open('mesh_padrao', 'w')
+        fid = open('mesh_standard', 'w')
 
         # Verificar se o arquivo foi aberto com sucesso
         if fid == -1:
@@ -865,6 +872,19 @@ def append_last_line_to_file(source_path, target_file):
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 
+def parse_live_coefficients(raw_text):
+    """Parses a forceCoeffs coefficient.dat snapshot (read mid-run, from a
+    still-running WSL case) into iteration/Cd/Cl arrays for a live plot.
+    Returns None if the text can't be parsed as coefficient data yet."""
+    try:
+        df = pd.read_csv(io.StringIO(raw_text), comment='#', sep=r'\s+', header=None)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return None
+    if df.empty or df.shape[1] < 5:
+        return None
+    return {"time": df.iloc[:, 0].tolist(), "cd": df.iloc[:, 1].tolist(), "cl": df.iloc[:, 4].tolist()}
+
+
 def summarize_coefficient_history(coefficient_path, avg_fraction=0.2, min_avg_rows=5):
     """
     Read an OpenFOAM forceCoeffs time history (coefficient.dat) and average
@@ -948,7 +968,7 @@ def summarize_yplus(yplus_path, avg_fraction=0.2, min_avg_rows=5):
     }
 
 
-def plot_data_from_txt(file_path, output_dir='graficos'):
+def plot_data_from_txt(file_path, output_dir='plots'):
     # Limpar a pasta de saída (se existir) antes de salvar novos gráficos
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
@@ -1036,6 +1056,169 @@ def plot_data_from_txt(file_path, output_dir='graficos'):
         plt.close()
 
 
+# ---------------------------------------------------------------------- #
+# Mesh preview: parsing the raw text a disposable blockMesh/checkMesh run
+# in WSL prints back, so the GUI can show mesh quality + a wireframe
+# before the user commits to a full simulation.
+# ---------------------------------------------------------------------- #
 
+def split_mesh_preview_output(raw_output):
+    """Splits the marker-delimited stdout of the mesh-preview WSL command
+    into its log/points/faces/boundary sections."""
+
+    def _between(text, start_marker, end_marker):
+        start = text.find(start_marker)
+        end = text.find(end_marker)
+        if start == -1 or end == -1:
+            return ""
+        return text[start + len(start_marker):end].strip("\n")
+
+    raw_output = raw_output or ""
+    return {
+        "log": _between(raw_output, "===MESH_LOG_START===", "===MESH_LOG_END==="),
+        "points": _between(raw_output, "===POINTS_START===", "===POINTS_END==="),
+        "faces": _between(raw_output, "===FACES_START===", "===FACES_END==="),
+        "boundary": _between(raw_output, "===BOUNDARY_START===", "===BOUNDARY_END==="),
+    }
+
+
+def parse_checkmesh_log(log_text):
+    """Extracts mesh-quality metrics from blockMesh/checkMesh console output."""
+    result = {
+        "blockmesh_ok": False,
+        "mesh_ok": False,
+        "cells": None,
+        "points": None,
+        "max_nonortho": None,
+        "avg_nonortho": None,
+        "max_skewness": None,
+        "max_aspect_ratio": None,
+        "warnings": [],
+        "error": None,
+    }
+    if not log_text:
+        result["error"] = "No output captured from blockMesh/checkMesh."
+        return result
+
+    # checkMesh only runs (and prints "Mesh stats") if blockMesh succeeded.
+    result["blockmesh_ok"] = "Mesh stats" in log_text
+
+    if not result["blockmesh_ok"]:
+        fatal = re.search(r'FOAM FATAL ERROR.*', log_text, re.S)
+        result["error"] = fatal.group(0).strip()[:800] if fatal else log_text.strip()[-800:]
+        return result
+
+    m = re.search(r'\bcells:\s*(\d+)', log_text)
+    if m:
+        result["cells"] = int(m.group(1))
+    m = re.search(r'\bpoints:\s*(\d+)', log_text)
+    if m:
+        result["points"] = int(m.group(1))
+    m = re.search(r'Mesh non-orthogonality Max:\s*([\d.]+)\s*average:\s*([\d.]+)', log_text)
+    if m:
+        result["max_nonortho"] = float(m.group(1))
+        result["avg_nonortho"] = float(m.group(2))
+    m = re.search(r'Max skewness\s*=\s*([\d.]+)', log_text)
+    if m:
+        result["max_skewness"] = float(m.group(1))
+    # checkMesh writes "Max aspect ratio = X OK." when the check passes, but
+    # "***...Max aspect ratio: X, ..." (colon, not "=") when it fails.
+    m = re.search(r'Max aspect ratio\s*[:=]\s*([\d.]+)', log_text)
+    if m:
+        result["max_aspect_ratio"] = float(m.group(1))
+
+    result["warnings"] = [line.strip() for line in log_text.splitlines() if line.strip().startswith("***")]
+
+    m = re.search(r'Failed (\d+) mesh checks?', log_text)
+    if m:
+        result["mesh_ok"] = False
+        result["failed_checks"] = int(m.group(1))
+    else:
+        result["mesh_ok"] = bool(re.search(r'\bMesh OK\b', log_text))
+
+    return result
+
+
+def _parse_openfoam_list(text, caster):
+    """Reads a bare OpenFOAM ASCII list ('N\\n(\\n...\\n)') and casts each entry."""
+    values = []
+    in_list = False
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("//"):
+            continue
+        if not in_list:
+            if s == "(":
+                in_list = True
+            continue
+        if s == ")":
+            break
+        values.append(caster(s))
+    return values
+
+
+def parse_openfoam_points(points_text):
+    def _cast(s):
+        parts = s.strip("()").split()
+        return (float(parts[0]), float(parts[1]), float(parts[2]))
+    return _parse_openfoam_list(points_text, _cast)
+
+
+def parse_openfoam_faces(faces_text):
+    def _cast(s):
+        inside = s[s.index("(") + 1:s.rindex(")")]
+        return [int(v) for v in inside.split()]
+    return _parse_openfoam_list(faces_text, _cast)
+
+
+def parse_boundary_patch(boundary_text, patch_name):
+    """Returns (startFace, nFaces) for a named patch in a polyMesh/boundary file."""
+    m = re.search(rf'\b{re.escape(patch_name)}\b\s*\{{(.*?)\}}', boundary_text or "", re.S)
+    if not m:
+        return None
+    block = m.group(1)
+    nfaces_m = re.search(r'nFaces\s+(\d+)', block)
+    startface_m = re.search(r'startFace\s+(\d+)', block)
+    if not nfaces_m or not startface_m:
+        return None
+    return int(startface_m.group(1)), int(nfaces_m.group(1))
+
+
+def build_mesh_wireframe(points_text, faces_text, boundary_text, patch_name="frontAndBack",
+                          near_field_box=((-2.0, 3.0), (-2.0, 2.0)), max_polygons=25000):
+    """Builds a 2D wireframe (list of cell polygons) from the polyMesh 'frontAndBack'
+    patch -- the mesh is extruded by a single cell in Z, so that patch's faces are
+    exactly the 2D grid cells. Keeps only the near-field region around the airfoil
+    (the domain otherwise stretches many chord lengths to the inlet/outlet) and
+    caps the polygon count for render performance."""
+    points = parse_openfoam_points(points_text)
+    faces = parse_openfoam_faces(faces_text)
+    patch = parse_boundary_patch(boundary_text, patch_name)
+    if not points or not faces or not patch:
+        return []
+
+    start_face, n_faces = patch
+    patch_faces = faces[start_face:start_face + n_faces]
+    if not patch_faces:
+        return []
+
+    z_values = [points[idx][2] for face in patch_faces for idx in face]
+    z_min = min(z_values)
+
+    (x_lo, x_hi), (y_lo, y_hi) = near_field_box
+    polygons = []
+    for face in patch_faces:
+        face_points = [points[idx] for idx in face]
+        if any(abs(p[2] - z_min) > 1e-9 for p in face_points):
+            continue  # the duplicate back-plane copy of the same 2D cell
+        if any(not (x_lo <= p[0] <= x_hi and y_lo <= p[1] <= y_hi) for p in face_points):
+            continue  # outside the near-field region we care about previewing
+        polygons.append([(p[0], p[1]) for p in face_points])
+
+    if len(polygons) > max_polygons:
+        stride = max(1, math.ceil(len(polygons) / max_polygons))
+        polygons = polygons[::stride]
+
+    return polygons
 
 

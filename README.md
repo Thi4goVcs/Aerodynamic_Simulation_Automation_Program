@@ -18,10 +18,21 @@ at the University of Brasília (UnB).
 - Generates NACA 4-digit airfoil coordinates, or imports a custom `.dat` file
 - Automatic block mesh generation, with a validated standard mesh (NACA 0012)
   or full manual control over every meshing parameter
+- Mesh preview before simulating: a wireframe of the near-field mesh plus
+  `checkMesh` quality metrics (non-orthogonality, skewness, aspect ratio),
+  with a way to go back and adjust the mesh before committing to a run
 - Compressible and incompressible flow simulation setups
-- Runs simulations for multiple angles of attack in one go
+- Runs simulations for multiple angles of attack in one go, sequentially or
+  in parallel (with a concurrency cap so it doesn't overload the machine)
+- Live Cd/Cl convergence plot while a sequential run is in progress
 - Extracts Cd, Cl, Cm and side-force coefficients and plots them automatically
+- Browse the result plots right inside the app (no need to open the `plots/`
+  folder separately)
+- Save/load a full setup (airfoil, mesh, flow properties) as a `.json`
+  preset, to repeat or share a configuration
 - Simulations run in a background thread — the UI stays responsive
+- Checks WSL/OpenFOAM are actually installed on startup and flags it on the
+  main screen if not, instead of only failing later mid-run
 
 ## Requirements
 
@@ -36,7 +47,7 @@ at the University of Brasília (UnB).
 > `Version: 2212` and were validated against that release. A different
 > OpenFOAM version may still work, but mesh/solver behavior isn't guaranteed
 > to match — if you use another version, update the version references in
-> `Padrão/Compressivel` and `Padrão/Incompressivel` accordingly.
+> `Standard/Compressible` and `Standard/Incompressible` accordingly.
 
 ## Installation
 
@@ -104,6 +115,13 @@ Install [Python 3.10+](https://www.python.org/downloads/) and make sure
   python Run.py
   ```
 
+Prefer not to install Python at all? Run **`build_exe.bat`** once (needs
+Python only for that one build step) to produce a standalone
+**`AeroSimApp.exe`** in the project folder; after that, just double-click the
+.exe. Keep it next to `Standard/` — it looks for the case templates and
+writes its output relative to its own location, not the folder it's launched
+from.
+
 ## Usage
 
 1. Pick a custom airfoil coordinates file, **or** type a 4-digit NACA code
@@ -114,18 +132,24 @@ Install [Python 3.10+](https://www.python.org/downloads/) and make sure
 
    ![Custom mesh parameters](docs/screenshot_custom_mesh.png)
 
-4. Choose **Incompressible** or **Compressible** flow and set the flow
+4. Review the **mesh preview** — a wireframe of the mesh plus `checkMesh`
+   quality metrics — before anything is simulated. Go back and adjust the
+   mesh if needed, or continue.
+
+   ![Mesh preview](docs/screenshot_mesh_preview.png)
+
+5. Choose **Incompressible** or **Compressible** flow and set the flow
    properties. Toggle "Show advanced parameters" for `nu`, `nut`, etc.
 
    ![Flow properties, incompressible](docs/screenshot_incompressible.png)
 
-5. Click **Run Simulation**. Progress is shown live; simulations run in the
+6. Click **Run Simulation**. Progress is shown live; simulations run in the
    background so the window stays responsive.
 
    ![Simulation progress](docs/screenshot_progress.png)
 
-6. Results are written to `Resultados/resultados.txt`, and plots + an Excel
-   spreadsheet are saved to `graficos/`.
+7. Results are written to `Results/results.txt`, and plots + an Excel
+   spreadsheet are saved to `plots/`.
 
    ![Simulation finished](docs/screenshot_complete.png)
 
@@ -135,15 +159,15 @@ parameter, plus troubleshooting tips.
 ## Project structure
 
 ```
-Run.py                  GUI application (entry point)
-functions.py             Airfoil geometry, mesh generation, post-processing
-Padrão/Incompressivel/   Base OpenFOAM case template (incompressible)
-Padrão/Compressivel/     Base OpenFOAM case template (compressible)
-Simulador/                Generated per-angle simulation cases (runtime)
-Resultados/               Aggregated results (resultados.txt) (runtime)
-graficos/                  Generated plots + data.xlsx (runtime)
-requirements.txt           Python dependencies
-run.bat                    Windows launcher
+Run.py                       GUI application (entry point)
+functions.py                 Airfoil geometry, mesh generation, post-processing
+Standard/Incompressible/     Base OpenFOAM case template (incompressible)
+Standard/Compressible/       Base OpenFOAM case template (compressible)
+Simulations/                 Generated per-angle simulation cases (runtime)
+Results/                     Aggregated results (results.txt) (runtime)
+plots/                       Generated plots + data.xlsx (runtime)
+requirements.txt             Python dependencies
+run.bat                      Windows launcher
 ```
 
 ## Troubleshooting
@@ -155,7 +179,7 @@ run.bat                    Windows launcher
 - **`ZeroDivisionError` / mesh generation error on Custom Mesh** — one of the
   mesh parameters is zero or otherwise invalid; the app now shows which angle
   failed instead of crashing. Adjust the parameter and try again.
-- **Excel file locked / results not updating** — close `graficos/data.xlsx`
+- **Excel file locked / results not updating** — close `plots/data.xlsx`
   before re-running a simulation; the app rewrites it on every run.
 
 ## License
