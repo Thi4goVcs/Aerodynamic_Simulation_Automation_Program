@@ -2,6 +2,10 @@ import numpy as np
 import math
 import os
 import pandas as pd
+import matplotlib
+# Backend não-interativo: plot_data_from_txt só salva PNGs em disco e pode ser
+# chamada a partir de uma thread em segundo plano (fora do event loop do Tkinter).
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import shutil
 from openpyxl import Workbook
