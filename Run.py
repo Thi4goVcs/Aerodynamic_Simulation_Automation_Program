@@ -538,7 +538,26 @@ class App:
 
     def run_commands_in_wsl(self, directory):
         unix_path = directory.replace("\\", "/").replace("C:/", "/mnt/c/")
-        command = f"cd {unix_path} && ./run_simulation.sh"  # Chama o script que você criou
+        run_id = os.path.basename(directory.rstrip("\\/"))
+        # OpenFOAM rejects spaces (and other special characters) in a case's
+        # resolved path (fileName::stripInvalid), which breaks any project
+        # checked out under a path like ".../Área de Trabalho/...". Reading
+        # and writing case files is also far slower on the /mnt/c (DrvFs)
+        # mount than on the native filesystem. To avoid both problems, the
+        # case is copied into a native WSL directory, run there, and only
+        # the results are copied back to the Windows-side folder.
+        wsl_work_dir = f"/tmp/aero_sim_{run_id}"
+        command = (
+            f'rm -rf "{wsl_work_dir}" && '
+            f'cp -r "{unix_path}" "{wsl_work_dir}" && '
+            f'cd "{wsl_work_dir}" && '
+            f'./run_simulation.sh; '
+            f'sim_exit=$?; '
+            f'rm -rf "{unix_path}/postProcessing"; '
+            f'cp -r "{wsl_work_dir}/postProcessing" "{unix_path}/" 2>/dev/null; '
+            f'rm -rf "{wsl_work_dir}"; '
+            f'exit $sim_exit'
+        )
         try:
             subprocess.run(["wsl", "bash", "-c", command], check=True)
             print(f"Simulation completed in the directory {directory}")

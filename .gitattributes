@@ -1,0 +1,6 @@
+# Scripts executed inside WSL/Linux must always check out with LF line
+# endings. A CRLF shebang ("#!/bin/bash\r") fails with "required file not
+# found" on Linux, regardless of the cloning machine's core.autocrlf setting.
+*.sh text eol=lf
+Allrun text eol=lf
+Allclean text eol=lf
