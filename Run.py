@@ -46,7 +46,10 @@ class App:
         tk.Button(self.master, text="Custom Mesh", font=('Arial', 14), command=self.Mesh_custom).pack(side=tk.RIGHT, padx=20, pady=20)
 
     def browse_file1(self):
-        self.file1_path.set(filedialog.askopenfilename()) 
+        path = filedialog.askopenfilename()
+        if not path:
+            return
+        self.file1_path.set(path)
         self.airfoil = 'airfoil_custom'
 
     def Mesh_Padrao(self):
@@ -58,7 +61,8 @@ class App:
     def Mesh_custom(self):
         self.mesh_choice = "malha_custom"
         self.clear_frame()
-        self.process_angles()
+        if not self.process_angles():
+            return
         self.search_airfoil()
         left_frame = tk.Frame(self.master)
         right_frame = tk.Frame(self.master)
@@ -153,6 +157,7 @@ class App:
             if len(naca_code) != 4 or not naca_code.isdigit():
                 messagebox.showerror("Error:", "Please enter a valid 4-digit NACA code.")
                 self.main_menu()
+                return
 
             m = int(naca_code[0]) / 100
             p = int(naca_code[1]) / 10
@@ -174,16 +179,18 @@ class App:
 
         elif self.airfoil == "airfoil_custom":
             file_path = self.file1_path.get()
-            # Abrir o arquivo com as coordenadas
-            with open(file_path, 'r') as file:
-                # Ler as coordenadas do arquivo
-                # Supondo que cada linha contenha uma coordenada no formato x y
-                # Você pode ajustar conforme necessário
-                coordinates = [line.strip().split() for line in file]
+            try:
+                # Abrir o arquivo com as coordenadas, ignorando linhas em branco
+                with open(file_path, 'r') as file:
+                    coordinates = [line.strip().split() for line in file if line.strip()]
 
-            # Separar as coordenadas em listas de x e y
-            x = [float(coord[0]) for coord in coordinates]
-            y = [float(coord[1]) for coord in coordinates]
+                # Separar as coordenadas em listas de x e y
+                x = [float(coord[0]) for coord in coordinates]
+                y = [float(coord[1]) for coord in coordinates]
+            except (FileNotFoundError, ValueError, IndexError) as e:
+                messagebox.showerror("Error:", f"Could not read coordinate file: {e}")
+                self.main_menu()
+                return
 
             # f.write("# x-coordinate y-coordinate\n")
             with open("coordenadas.dat", "w") as file:
@@ -198,12 +205,15 @@ class App:
         except ValueError:
             messagebox.showerror("Error:", "Please enter valid angles separated by commas.")
             self.angles = []  # Limpa a lista de ângulos em caso de erro
-            self.main_menu()    
+            self.main_menu()
+            return False
+        return True
 
 
     def Simulation_Incompressible(self):
         self.simulation_tipo = "Incompressible"
-        self.process_angles()  # Processa os ângulos
+        if not self.process_angles():  # Processa os ângulos
+            return
         source_directory = "Padrão\\Incompressivel"  # Caminho para a pasta de onde os arquivos serão copiados
         target_directory = "Simulador"  # Caminho para a pasta que será limpa e onde serão criadas subpastas
         self.clear_and_create_angle_directories(target_directory, source_directory)
@@ -213,7 +223,8 @@ class App:
 
     def simulation_Compressible(self):
         self.simulation_tipo = "Compressible"
-        self.process_angles()  # Processa os ângulos
+        if not self.process_angles():  # Processa os ângulos
+            return
         source_directory = "Padrão\\Compressivel"  # Caminho para a pasta de onde os arquivos serão copiados
         target_directory = "Simulador"  # Caminho para a pasta que será limpa e onde serão criadas subpastas
         self.clear_and_create_angle_directories(target_directory, source_directory)
@@ -239,7 +250,8 @@ class App:
 
  
     def execute_mesh_operations(self):
-        self.process_angles()
+        if not self.process_angles():
+            return
         source_file = "mesh_padrao"  # Caminho do arquivo a ser copiado
         base_directory = "Simulador"
         if self.simulation_tipo == "Incompressible":
@@ -266,54 +278,58 @@ class App:
             orig_directory_path = os.path.join(angle_directory_path, "0.orig")
             # Cria o diretório "System" se não existir
             os.makedirs(system_directory_path, exist_ok=True)
-            
-            # Executa a função blockMeshDirect para o ângulo atual
-            if self.mesh_choice == "malha_padrão":
-                functions.blockMeshDirect(angle)
-            elif self.mesh_choice == "malha_custom":
-                distance_to_inlet_val = self.distance_to_inlet.get()
-                distance_to_outlet_val = self.distance_to_outlet.get()
-                cell_size_at_leading_edge_val = self.cell_size_at_leading_edge.get()
-                cell_size_at_trailing_edge_val = self.cell_size_at_trailing_edge.get()
-                cell_size_in_middle_val = self.cell_size_in_middle.get()
-                separating_point_position_val = self.separating_point_position.get()
-                boundary_layer_thickness_val = self.boundary_layer_thickness.get()
-                first_layer_thickness_val = self.first_layer_thickness.get()
-                expansion_ratio_val = self.expansion_ratio.get()
-                max_cell_size_in_inlet_val = self.max_cell_size_in_inlet.get()
-                max_cell_size_in_outlet_val = self.max_cell_size_in_outlet.get()
-                max_cell_size_in_inlet_and_outlet_val = self.max_cell_size_in_inlet_and_outlet.get()
-                num_mesh_on_boundary_layer_1_val = self.num_mesh_on_boundary_layer_1.get()
-                num_mesh_on_boundary_layer_2_val = self.num_mesh_on_boundary_layer_2.get()
-                num_mesh_at_tail_val = self.num_mesh_at_tail.get()
-                num_mesh_in_leading_val = self.num_mesh_in_leading.get()
-                num_mesh_in_trailing_val = self.num_mesh_in_trailing.get()
+
+            try:
+                # Executa a função blockMeshDirect para o ângulo atual
+                if self.mesh_choice == "malha_padrão":
+                    functions.blockMeshDirect(angle)
+                elif self.mesh_choice == "malha_custom":
+                    distance_to_inlet_val = self.distance_to_inlet.get()
+                    distance_to_outlet_val = self.distance_to_outlet.get()
+                    cell_size_at_leading_edge_val = self.cell_size_at_leading_edge.get()
+                    cell_size_at_trailing_edge_val = self.cell_size_at_trailing_edge.get()
+                    cell_size_in_middle_val = self.cell_size_in_middle.get()
+                    separating_point_position_val = self.separating_point_position.get()
+                    boundary_layer_thickness_val = self.boundary_layer_thickness.get()
+                    first_layer_thickness_val = self.first_layer_thickness.get()
+                    expansion_ratio_val = self.expansion_ratio.get()
+                    max_cell_size_in_inlet_val = self.max_cell_size_in_inlet.get()
+                    max_cell_size_in_outlet_val = self.max_cell_size_in_outlet.get()
+                    max_cell_size_in_inlet_and_outlet_val = self.max_cell_size_in_inlet_and_outlet.get()
+                    num_mesh_on_boundary_layer_1_val = self.num_mesh_on_boundary_layer_1.get()
+                    num_mesh_on_boundary_layer_2_val = self.num_mesh_on_boundary_layer_2.get()
+                    num_mesh_at_tail_val = self.num_mesh_at_tail.get()
+                    num_mesh_in_leading_val = self.num_mesh_in_leading.get()
+                    num_mesh_in_trailing_val = self.num_mesh_in_trailing.get()
 
 
-                functions.blockMeshDirect_Custom(angle, distance_to_inlet_val, distance_to_outlet_val,
-                            cell_size_at_leading_edge_val, cell_size_at_trailing_edge_val,
-                            cell_size_in_middle_val, separating_point_position_val,
-                            boundary_layer_thickness_val, first_layer_thickness_val,
-                            expansion_ratio_val, max_cell_size_in_inlet_val,
-                            max_cell_size_in_outlet_val, max_cell_size_in_inlet_and_outlet_val,
-                            num_mesh_on_boundary_layer_1_val, num_mesh_on_boundary_layer_2_val,
-                            num_mesh_at_tail_val, num_mesh_in_leading_val, num_mesh_in_trailing_val)
+                    functions.blockMeshDirect_Custom(angle, distance_to_inlet_val, distance_to_outlet_val,
+                                cell_size_at_leading_edge_val, cell_size_at_trailing_edge_val,
+                                cell_size_in_middle_val, separating_point_position_val,
+                                boundary_layer_thickness_val, first_layer_thickness_val,
+                                expansion_ratio_val, max_cell_size_in_inlet_val,
+                                max_cell_size_in_outlet_val, max_cell_size_in_inlet_and_outlet_val,
+                                num_mesh_on_boundary_layer_1_val, num_mesh_on_boundary_layer_2_val,
+                                num_mesh_at_tail_val, num_mesh_in_leading_val, num_mesh_in_trailing_val)
 
 
-            # Define o caminho do arquivo de destino com o novo nome 'ovo' dentro da pasta "System"
-            destination_file_path = os.path.join(system_directory_path, "blockMeshDict")
-            
-            # Copia o arquivo para o diretório "System" do ângulo com o novo nome
-            shutil.copy(source_file, destination_file_path)
-                        # Executa a função blockMeshDirect para o ângulo atual
-            if self.simulation_tipo == "Incompressible":
-                functions.variables_incompressible(orig_directory_path, angle, flow_speed,Pressure,nut_value,nutilda_value,nu_value_I)
-            elif self.simulation_tipo == "Compressible":
+                # Define o caminho do arquivo de destino com o novo nome 'ovo' dentro da pasta "System"
+                destination_file_path = os.path.join(system_directory_path, "blockMeshDict")
 
-                functions.variables_compressible(orig_directory_path, angle, flow_speed,Pressure,nut_value,T_value,omega_value,k_value,alphat_value,nu_value_c)
+                # Copia o arquivo para o diretório "System" do ângulo com o novo nome
+                shutil.copy(source_file, destination_file_path)
+                            # Executa a função blockMeshDirect para o ângulo atual
+                if self.simulation_tipo == "Incompressible":
+                    functions.variables_incompressible(orig_directory_path, angle, flow_speed,Pressure,nut_value,nutilda_value,nu_value_I)
+                elif self.simulation_tipo == "Compressible":
 
-            
-            
+                    functions.variables_compressible(orig_directory_path, angle, flow_speed,Pressure,nut_value,T_value,omega_value,k_value,alphat_value,nu_value_c)
+            except Exception as e:
+                messagebox.showerror("Mesh Generation Error",
+                    f"Failed to generate mesh for angle {angle}: {e}\n\n"
+                    "Check the mesh parameters (e.g. avoid zero values) and try again.")
+                return
+
             print(f"File '{source_file}' copied and renamed to '{destination_file_path}' after running blockMeshDirect for angle {angle}")
 
         self.run_simulations()
@@ -321,33 +337,45 @@ class App:
 
     def run_simulations(self):
         base_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "Simulador")
-        
+        failed_angles = []
+
         # Configurando a barra de progresso
         with tqdm(total=len(self.angles), desc="Simulações") as pbar:
             for angle in self.angles:
                 angle_directory = os.path.join(base_directory, f"Angulo_{angle}")
                 os.makedirs(angle_directory, exist_ok=True)  # Cria o diretório se não existir
-                self.run_commands_in_wsl(angle_directory)
+                if not self.run_commands_in_wsl(angle_directory):
+                    failed_angles.append(angle)
                 pbar.update(1)  # Atualiza a barra de progresso a cada iteração
-            
+
         # Caminho do diretório Simulador
         base_directory = os.path.join(os.path.dirname(__file__), "Simulador")
         # Chama a função passando o diretório base
-        self.extrair_dados(base_directory)    
+        self.extrair_dados(base_directory)
 
-        messagebox.showinfo("Simulation Complete:", "All simulations have been successfully completed!")
+        if failed_angles:
+            messagebox.showwarning("Simulation Finished with Errors",
+                f"Simulation failed for angle(s): {failed_angles}.\n"
+                "Check the console output for details.")
+        else:
+            messagebox.showinfo("Simulation Complete:", "All simulations have been successfully completed!")
 
 
     def run_commands_in_wsl(self, directory):
-        
+
         unix_path = directory.replace("\\", "/").replace("C:/", "/mnt/c/")
         command = f"cd {unix_path} && ./run_simulation.sh"  # Chama o script que você criou
         try:
             subprocess.run(["wsl", "bash", "-c", command], check=True)
             print(f"Simulation completed in the directory {directory}")
+            return True
         except subprocess.CalledProcessError as e:
             print(f"Error executing simulation in the directory {directory}: {e}")
             print("Please check that the path, permissions, and script are correct.")
+            return False
+        except FileNotFoundError:
+            print("WSL executable not found. Ensure WSL is installed and available in PATH.")
+            return False
 
 
     def arquivo(self):
@@ -503,16 +531,25 @@ class App:
                 # Caminho para o arquivo coefficient.dat
                 coefficient_path = os.path.join(angle_directory_path, "postProcessing", "forceCoeffs", "0", "coefficient.dat")
 
+                # Número de colunas de dados esperadas (Time, Cd, Cd(f), Cd(r), Cl, Cl(f), Cl(r), CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r))
+                num_result_columns = 13
+                missing_data_row = "\t".join(["nan"] * num_result_columns) + "\n"
+
                 # Verifica se o arquivo coefficient.dat existe
                 if os.path.isfile(coefficient_path):
                     with open(coefficient_path, "r") as coeff_file:
                         # Lê todas as linhas do arquivo
                         lines = coeff_file.readlines()
-                        # Pega a última linha de dados
-                        last_line = lines[-1]
-                        # Escreve a última linha no arquivo de resultados
-                        resultados_file.write(last_line)
-                        
+                        if lines:
+                            # Pega a última linha de dados e escreve no arquivo de resultados
+                            resultados_file.write(lines[-1])
+                        else:
+                            print(f"Warning: {coefficient_path} is empty, skipping angle {angle}")
+                            resultados_file.write(missing_data_row)
+                else:
+                    print(f"Warning: no results found for angle {angle} ({coefficient_path})")
+                    resultados_file.write(missing_data_row)
+
         functions.plot_data_from_txt(resultados_path)
 
 
