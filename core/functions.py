@@ -3,7 +3,6 @@ import math
 import os
 import re
 import io
-import sys
 import pandas as pd
 import matplotlib
 # Backend não-interativo: plot_data_from_txt só salva PNGs em disco e pode ser
@@ -13,15 +12,10 @@ import matplotlib.pyplot as plt
 import shutil
 from openpyxl import Workbook
 
-# Diretório base do app. Quando empacotado com PyInstaller (--onefile),
-# __file__ aponta para dentro do diretório temporário _MEIPASS, não para o
-# .exe real -- nesse caso os arquivos de runtime (Results/, Simulations/,
-# plots/, etc.) devem ficar ao lado do .exe, não em uma pasta temporária.
-script_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
-    else os.path.dirname(os.path.abspath(__file__))
-
-# Alterar o diretório atual para o diretório do script
-os.chdir(script_dir)
+# O diretório de trabalho (raiz do app, onde ficam coordenadas.dat, Results/,
+# Simulations/, plots/, etc.) é definido pelo Run.py na inicialização -- este
+# módulo só usa caminhos relativos, sem presumir sua própria localização em
+# disco (que agora é core/functions.py, um nível abaixo da raiz do app).
 
 def naca4digit(m, p, t, c, num_points=102):
         """
