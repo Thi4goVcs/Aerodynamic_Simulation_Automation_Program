@@ -211,12 +211,12 @@ end of the run for that angle.
 - Close `plots/data.xlsx` before starting a new simulation; the app
   rewrites it on every run and Excel keeps the file locked while open.
 - To change the number of solver iterations, edit `endTime` or `deltaT` in
-  the relevant case's `system/controlDict` under `Standard/Incompressible` or
-  `Standard/Compressible`.
+  the relevant case's `system/controlDict` under `core/Standard/Incompressible`
+  or `core/Standard/Compressible`.
 
 ## Citation
 
 This program was developed as part of the author's undergraduate thesis
 (TCC) at the University of Brasília (UnB). If you use it in academic work,
-please cite the original thesis — see [3_LICENSE.txt](3_LICENSE.txt) for the
-citation requirement attached to academic use.
+please cite the original thesis — see [LICENSE](LICENSE) for the citation
+requirement attached to academic use.

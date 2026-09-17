@@ -11,18 +11,22 @@ from tkinter import messagebox, filedialog
 import customtkinter as ctk
 from PIL import Image
 
+# When bundled by PyInstaller (--onefile), __file__ resolves inside the
+# temporary _MEIPASS extraction dir, not next to the actual .exe -- runtime
+# output (coordenadas.dat, Results/, Simulations/, plots/) and the app's own
+# internals (core/) must be found next to the .exe instead, so this is the
+# base directory the rest of the app should use for those paths.
+APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+    else os.path.dirname(os.path.realpath(__file__))
+
+# functions.py and the OpenFOAM case templates live under core/, out of the
+# way of what you actually interact with (Run.py, Results/, plots/, ...).
+os.chdir(APP_DIR)
+sys.path.insert(0, os.path.join(APP_DIR, "core"))
 import functions  # type: ignore
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
-
-# When bundled by PyInstaller (--onefile), __file__ resolves inside the
-# temporary _MEIPASS extraction dir, not next to the actual .exe -- runtime
-# output (coordenadas.dat, Results/, Simulations/, plots/) and the OpenFOAM
-# case templates (Standard/) must live next to the .exe instead, so this is
-# the base directory the rest of the app should use for those paths.
-APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
-    else os.path.dirname(os.path.realpath(__file__))
 
 FONT_TITLE = ("Segoe UI", 22, "bold")
 FONT_SUBTITLE = ("Segoe UI", 13)
@@ -547,7 +551,7 @@ class App:
     def run_mesh_preview_in_wsl(self, mesh_file="mesh_standard"):
         project_root = APP_DIR
         mesh_unix_path = os.path.join(project_root, mesh_file).replace("\\", "/").replace("C:/", "/mnt/c/")
-        template_unix = os.path.join(project_root, "Standard", "Incompressible") \
+        template_unix = os.path.join(project_root, "core", "Standard", "Incompressible") \
             .replace("\\", "/").replace("C:/", "/mnt/c/")
         # Meshing (blockMesh/checkMesh) doesn't depend on the flow type, so the
         # Incompressible template is reused as a disposable meshing sandbox
@@ -761,7 +765,7 @@ class App:
         self.simulation_tipo = "Incompressible"
         if not self.process_angles():  # Processa os ângulos
             return
-        source_directory = "Standard\\Incompressible"
+        source_directory = "core\\Standard\\Incompressible"
         target_directory = "Simulations"
         self.clear_and_create_angle_directories(target_directory, source_directory)
         print(f"Starting simulation with angles: {self.angles}")
@@ -771,7 +775,7 @@ class App:
         self.simulation_tipo = "Compressible"
         if not self.process_angles():  # Processa os ângulos
             return
-        source_directory = "Standard\\Compressible"
+        source_directory = "core\\Standard\\Compressible"
         target_directory = "Simulations"
         self.clear_and_create_angle_directories(target_directory, source_directory)
         print(f"Starting simulation with angles: {self.angles}")

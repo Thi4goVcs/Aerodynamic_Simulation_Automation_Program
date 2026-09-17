@@ -47,7 +47,7 @@ at the University of Brasília (UnB).
 > `Version: 2212` and were validated against that release. A different
 > OpenFOAM version may still work, but mesh/solver behavior isn't guaranteed
 > to match — if you use another version, update the version references in
-> `Standard/Compressible` and `Standard/Incompressible` accordingly.
+> `core/Standard/Compressible` and `core/Standard/Incompressible` accordingly.
 
 ## Installation
 
@@ -159,15 +159,18 @@ parameter, plus troubleshooting tips.
 ## Project structure
 
 ```
-Run.py                       GUI application (entry point)
-functions.py                 Airfoil geometry, mesh generation, post-processing
-Standard/Incompressible/     Base OpenFOAM case template (incompressible)
-Standard/Compressible/       Base OpenFOAM case template (compressible)
-Simulations/                 Generated per-angle simulation cases (runtime)
-Results/                     Aggregated results (results.txt) (runtime)
-plots/                       Generated plots + data.xlsx (runtime)
-requirements.txt             Python dependencies
-run.bat                      Windows launcher
+Run.py                            GUI application (entry point)
+run.bat                           Windows launcher
+build_exe.bat                     Builds a standalone AeroSimApp.exe
+core/                              App internals -- nothing here needs to be
+  functions.py                    touched directly to use the app
+  Standard/Incompressible/        Base OpenFOAM case template (incompressible)
+  Standard/Compressible/          Base OpenFOAM case template (compressible)
+Simulations/                      Generated per-angle simulation cases (runtime)
+Results/                          Aggregated results (results.txt) (runtime)
+plots/                            Generated plots + data.xlsx (runtime)
+docs/                              Screenshots used by README.md/MANUAL.md
+requirements.txt                  Python dependencies
 ```
 
 ## Troubleshooting
@@ -184,8 +187,8 @@ run.bat                      Windows launcher
 
 ## License
 
-Distributed under the MIT License — see [LICENSE](LICENSE) for details, and
-[3_LICENSE.txt](3_LICENSE.txt) for the academic-use citation note.
+Distributed under the MIT License — see [LICENSE](LICENSE) for details,
+including the academic-use citation requirement.
 
 ## Contact
 
