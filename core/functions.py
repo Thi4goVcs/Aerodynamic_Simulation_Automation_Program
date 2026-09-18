@@ -74,8 +74,135 @@ def naca4digit(m, p, t, c, num_points=102):
         return xu, yu, xl, yl
 
 
-         
-def blockMeshDirect(Alpha):
+
+# Ponto de referência: 2e-11 m de primeira célula foi validado empiricamente
+# (rodada real) como dando y+ ~= 37-48 em velocity=15 m/s, nu=1e-5 (Re=1.5e6)
+# -- o regime "conhecido bom" em que este app foi originalmente ajustado.
+_REFERENCE_FIRST_LAYER = 0.00000000002
+_REFERENCE_VELOCITY = 15.0
+_REFERENCE_NU = 1e-5
+
+
+def _wall_shear_scale(velocity, nu, chord=1.0):
+    """
+    u_tau/nu estimado por Schlichting (atrito de placa plana turbulenta,
+    valido para ~1e6 < Re_c < 1e9). So a RAZAO entre duas condicoes de
+    escoamento e usada (ver first_layer_thickness_for_flow), entao a relacao
+    (desconhecida) entre altura de celula e y+ real embutida na geometria
+    do blockMeshDirect se cancela.
+    """
+    re_c = max(velocity * chord / nu, 1e5)
+    cf = (2 * math.log10(re_c) - 0.65) ** -2.3
+    u_tau = velocity * math.sqrt(cf / 2)
+    return u_tau / nu
+
+
+def first_layer_thickness_for_flow(velocity, nu, chord=1.0):
+    """
+    Escala a altura da primeira celula da camada limite para manter,
+    aproximadamente, o mesmo y+ do regime de referencia (validado
+    empiricamente) em qualquer outra velocidade/numero de Reynolds.
+    Cai de volta no valor historico se velocity/nu vierem invalidos.
+    """
+    if not velocity or not nu:
+        return _REFERENCE_FIRST_LAYER
+    ref_scale = _wall_shear_scale(_REFERENCE_VELOCITY, _REFERENCE_NU, chord)
+    new_scale = _wall_shear_scale(velocity, nu, chord)
+    return _REFERENCE_FIRST_LAYER * (ref_scale / new_scale)
+
+
+# A malha padrao concentra os N10 primeiros elementos da camada limite numa
+# grade geometrica (razao Expansion_ratio) que cobre Boundary_layer_thickness
+# -- e' essa grade, nao First_layer_thickness, que de fato controla a altura
+# da celula junto a parede (y+). Ver blockMeshDirect: o bloco escrito com
+# razao O10 = Expansion_ratio**N10 cobre exatamente essa regiao.
+_REFERENCE_EXPANSION_RATIO = 1.01
+_REFERENCE_BOUNDARY_LAYER_THICKNESS = 0.2
+_REFERENCE_N_BOUNDARY_LAYER_CELLS = 100
+
+
+def _boundary_layer_first_cell(thickness, ratio, n_cells):
+    """Altura da 1a celula de uma grade geometrica de n_cells cobrindo `thickness`."""
+    return thickness * (ratio - 1) / (ratio ** n_cells - 1)
+
+
+def _solve_expansion_ratio_for_first_cell(target_first_cell, thickness, n_cells,
+                                           lo=1.00001, hi=5.0, iters=100):
+    """
+    Busca binaria pela razao de expansao que produz a altura de 1a celula
+    desejada (thickness*(r-1)/(r**n-1) e monotonicamente decrescente em r).
+    """
+    def g(ratio):
+        return _boundary_layer_first_cell(thickness, ratio, n_cells) - target_first_cell
+    if g(lo) <= 0:
+        return lo
+    if g(hi) >= 0:
+        return hi
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        if g(mid) > 0:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def expansion_ratio_for_flow(velocity, nu, chord=1.0,
+                              boundary_layer_thickness=_REFERENCE_BOUNDARY_LAYER_THICKNESS,
+                              n_cells=_REFERENCE_N_BOUNDARY_LAYER_CELLS):
+    """
+    Escala a razao de expansao da camada limite para manter, aproximadamente,
+    o mesmo y+ do regime de referencia (validado empiricamente com uma
+    simulacao real: y+ ~= 37-48 em velocity=15 m/s, nu=1e-5, Re=1.5e6) em
+    qualquer outra velocidade/numero de Reynolds. Cai de volta no valor
+    historico se velocity/nu vierem invalidos.
+    """
+    if not velocity or not nu:
+        return _REFERENCE_EXPANSION_RATIO
+    ref_first_cell = _boundary_layer_first_cell(
+        _REFERENCE_BOUNDARY_LAYER_THICKNESS, _REFERENCE_EXPANSION_RATIO,
+        _REFERENCE_N_BOUNDARY_LAYER_CELLS)
+    ref_scale = _wall_shear_scale(_REFERENCE_VELOCITY, _REFERENCE_NU, chord)
+    new_scale = _wall_shear_scale(velocity, nu, chord)
+    target_first_cell = ref_first_cell * (ref_scale / new_scale)
+    return _solve_expansion_ratio_for_first_cell(target_first_cell, boundary_layer_thickness, n_cells)
+
+
+# A aresta de saida dos blocos da esteira tinha sua razao de expansao derivada da
+# altura da primeira celula na parede (O18 = F11*O13/E11*...), o que propagava o
+# refino da camada limite ate a saida, 20 cordas a jusante: a primeira celula la
+# ficava com 2e-5 corda e razao de aspecto ~2e4 -- origem medida das celulas que o
+# checkMesh reprovava. A 20 cordas a esteira tem ordem de 1 corda de largura, entao
+# o que importa e a altura alvo abaixo, nao o y+ da parede.
+_WAKE_OUTLET_FIRST_CELL = 0.008
+
+
+def wake_outlet_expansion_ratio(edge_length, n_cells,
+                                 target_first_cell=_WAKE_OUTLET_FIRST_CELL):
+    """
+    Razao de expansao (ultima/primeira celula) da aresta de saida dos blocos da
+    esteira. Depende do tamanho do dominio e da contagem de celulas -- que e do
+    que ela de fato depende -- e nao do Reynolds.
+    """
+    ratio = _solve_expansion_ratio_for_first_cell(target_first_cell, edge_length, n_cells)
+    return ratio ** (n_cells - 1)
+
+
+def _wake_corner_offset(angle, distance_to_inlet, distance_to_outlet):
+    """
+    Deslocamento vertical do canto de saida (vertices 8 e 10). Ele inclina a linha
+    de interface que vai do bordo de fuga ate a saida -- onde fica a banda refinada
+    da esteira -- para acompanhar a direcao do escoamento. Era arredondado para
+    inteiro, o que fazia a banda andar em degraus (10 e 12 graus caiam na mesma
+    malha) com ate 1,3 grau de desalinhamento. O limite impede que o vertice 8
+    alcance o 9, o que degenera a malha a partir de ~72 graus.
+    """
+    offset = math.sin(math.radians(angle)) * (distance_to_outlet + 1)
+    limit = 0.9 * distance_to_inlet
+    return max(-limit, min(limit, offset))
+
+
+def blockMeshDirect(Alpha, first_layer_thickness=None, expansion_ratio=None):
 
         # Variáveis
         Distance_to_inlet = 20 # x chord length
@@ -88,8 +215,10 @@ def blockMeshDirect(Alpha):
         Cell_size_in_middle = 0.000000015
         Separating_point_position = 0.25 # from leading point
         Boundary_layer_thickness = 0.2
-        First_layer_thickness = 0.00000000002
-        Expansion_ratio = 1.01
+        First_layer_thickness = (first_layer_thickness if first_layer_thickness is not None
+                                  else _REFERENCE_FIRST_LAYER)
+        Expansion_ratio = (expansion_ratio if expansion_ratio is not None
+                            else _REFERENCE_EXPANSION_RATIO)
         Max_cell_size_in_inlet = 0.000001
         Max_cell_size_in_outlet = 0.000004
         Max_cell_size_in_inlet_x_outlet = 0.00001
@@ -130,7 +259,7 @@ def blockMeshDirect(Alpha):
         O10 = F8 ** N10
         O13 = D11 / H8
         O16 = E11 / E5
-        O18 = F11 * O13 / E11 * (N13 + N10) / N13
+        O18 = wake_outlet_expansion_ratio(A2, N10 + N13)
         O20 = G5
         O21 = Number_of_mesh_in_leading
         O22 = F5 / D5
@@ -208,9 +337,9 @@ def blockMeshDirect(Alpha):
         fid.write('\t(\t1\t0\t%.2f\t)\t//\t5\n\n' % D2)
         fid.write('\t(\t1\t%i\t%.2f\t)\t//\t6\n\n' % (A2, D2))
         fid.write('\t(\t%i\t0\t%.2f\t)\t//\t7\n\n' % (-A2 + 1, D2))
-        fid.write('\t(\t%i\t%i\t0\t)\t//\t8\n\n' % (B2 + 1, round(np.sin(np.radians(C2)) * (B2 + 1))))
+        fid.write('\t(\t%i\t%0.6f\t0\t)\t//\t8\n\n' % (B2 + 1, _wake_corner_offset(C2, A2, B2)))
         fid.write('\t(\t%i\t%i\t0\t)\t//\t9\n\n' % (B2 + 1, A2))
-        fid.write('\t(\t%i\t%i\t%.2f\t)\t//\t10\n\n' % (B2 + 1, round(np.sin(np.radians(C2)) * (B2 + 1)), D2))
+        fid.write('\t(\t%i\t%0.6f\t%.2f\t)\t//\t10\n\n' % (B2 + 1, _wake_corner_offset(C2, A2, B2), D2))
         fid.write('\t(\t%i\t%i\t%.2f\t)\t//\t11\n\n' % (B2 + 1, A2, D2))
         fid.write('\t(\t1\t%i\t0\t)\t//\t12\n\n' % (-A2))
         fid.write('\t(\t1\t%i\t%.2f\t)\t//\t13\n\n' % (-A2, D2))
@@ -462,7 +591,7 @@ def blockMeshDirect_Custom(alpha, distance_to_inlet, distance_to_outlet,cell_siz
         O10 = F8 ** N10
         O13 = D11 / H8
         O16 = E11 / E5
-        O18 = F11 * O13 / E11 * (N13 + N10) / N13
+        O18 = wake_outlet_expansion_ratio(A2, N10 + N13)
         O20 = G5
         O21 = Number_of_mesh_in_leading
         O22 = F5 / D5
@@ -543,9 +672,9 @@ def blockMeshDirect_Custom(alpha, distance_to_inlet, distance_to_outlet,cell_siz
         fid.write('\t(\t1\t0\t%.2f\t)\t//\t5\n\n' % D2)
         fid.write('\t(\t1\t%i\t%.2f\t)\t//\t6\n\n' % (A2, D2))
         fid.write('\t(\t%i\t0\t%.2f\t)\t//\t7\n\n' % (-A2 + 1, D2))
-        fid.write('\t(\t%i\t%i\t0\t)\t//\t8\n\n' % (B2 + 1, round(np.sin(np.radians(C2)) * (B2 + 1))))
+        fid.write('\t(\t%i\t%0.6f\t0\t)\t//\t8\n\n' % (B2 + 1, _wake_corner_offset(C2, A2, B2)))
         fid.write('\t(\t%i\t%i\t0\t)\t//\t9\n\n' % (B2 + 1, A2))
-        fid.write('\t(\t%i\t%i\t%.2f\t)\t//\t10\n\n' % (B2 + 1, round(np.sin(np.radians(C2)) * (B2 + 1)), D2))
+        fid.write('\t(\t%i\t%0.6f\t%.2f\t)\t//\t10\n\n' % (B2 + 1, _wake_corner_offset(C2, A2, B2), D2))
         fid.write('\t(\t%i\t%i\t%.2f\t)\t//\t11\n\n' % (B2 + 1, A2, D2))
         fid.write('\t(\t1\t%i\t0\t)\t//\t12\n\n' % (-A2))
         fid.write('\t(\t1\t%i\t%.2f\t)\t//\t13\n\n' % (-A2, D2))
@@ -962,7 +1091,7 @@ def summarize_yplus(yplus_path, avg_fraction=0.2, min_avg_rows=5):
     }
 
 
-def plot_data_from_txt(file_path, output_dir='plots'):
+def plot_data_from_txt(file_path, output_dir='plots', naca_code=None):
     # Limpar a pasta de saída (se existir) antes de salvar novos gráficos
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
@@ -1048,6 +1177,78 @@ def plot_data_from_txt(file_path, output_dir='plots'):
                                      'Aerodynamic Efficiency (Cl/Cd) vs. Angle of Attack')
         plt.savefig(os.path.join(output_dir, 'efficiency_Cl_Cd.png'))
         plt.close()
+
+    validation_result = None
+    if naca_code:
+        reference_path = find_reference_dataset(naca_code)
+        if reference_path:
+            validation_result = plot_validation(data, reference_path, output_dir)
+    return validation_result
+
+
+def find_reference_dataset(naca_code):
+    """Looks for a bundled experimental/reference dataset for this NACA code
+    under core/reference_data/naca<code>_*.csv. Returns the path, or None if
+    there isn't one -- validation is best-effort, not every profile has a
+    published reference case bundled with the app."""
+    ref_dir = os.path.join("core", "reference_data")
+    if not naca_code or not os.path.isdir(ref_dir):
+        return None
+    prefix = f"naca{naca_code}_".lower()
+    matches = sorted(f for f in os.listdir(ref_dir) if f.lower().startswith(prefix) and f.endswith(".csv"))
+    return os.path.join(ref_dir, matches[0]) if matches else None
+
+
+def plot_validation(data, reference_path, output_dir):
+    """Overlays this run's simulated Cl/Cd vs. angle of attack against a
+    bundled experimental/reference dataset, for whichever angles were run
+    that also exist in the reference, and reports the relative difference.
+    Returns {"citation": str, "summary": DataFrame} or None if there's no
+    overlap between the simulated and reference angles."""
+    try:
+        ref = pd.read_csv(reference_path, comment='#')
+    except (OSError, pd.errors.EmptyDataError):
+        return None
+    if not {'alpha', 'Cl', 'Cd'}.issubset(ref.columns):
+        return None
+    ref = ref.set_index('alpha').sort_index()
+    ref.index = ref.index.astype(float)
+
+    common_alphas = data.index.intersection(ref.index)
+    if len(common_alphas) == 0:
+        return None
+
+    with open(reference_path, encoding='utf-8') as f:
+        citation_lines = [line.lstrip('#').strip() for line in f if line.startswith('#')]
+    citation = ' '.join(citation_lines) if citation_lines else os.path.basename(reference_path)
+
+    summary_rows = []
+    for coeff in ('Cl', 'Cd'):
+        if coeff not in data.columns:
+            continue
+        plt.figure(figsize=(7.5, 5))
+        plt.plot(data.index, data[coeff], marker='o', markersize=6, linewidth=1.8,
+                  color='#1f6fb2', label='Simulated (this run)', zorder=2)
+        plt.plot(ref.index, ref[coeff], marker='s', markersize=6, linewidth=1.8,
+                  linestyle='--', color='#e0a030', label='Reference (experimental)', zorder=2)
+        plt.title(f'{coeff} vs. Angle of Attack -- Validation')
+        plt.xlabel('alpha (deg)')
+        plt.ylabel(coeff)
+        plt.legend(loc='best', fontsize=9)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'validation_{coeff}.png'))
+        plt.close()
+
+        for alpha in common_alphas:
+            sim_v = float(data.loc[alpha, coeff])
+            ref_v = float(ref.loc[alpha, coeff])
+            rel_err = abs(sim_v - ref_v) / abs(ref_v) * 100 if ref_v != 0 else float('nan')
+            summary_rows.append({'alpha': alpha, 'coeff': coeff, 'simulated': sim_v,
+                                  'reference': ref_v, 'rel_error_pct': rel_err})
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(os.path.join(output_dir, 'validation_summary.csv'), index=False)
+    return {"citation": citation, "summary": summary_df}
 
 
 # ---------------------------------------------------------------------- #

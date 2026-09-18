@@ -28,7 +28,7 @@
          UName       U;
          log         true; 
          CofR (0.25 0 0);
-         liftDir (-0.173648  $cos_alpha 0);
+         liftDir (-$sen_alpha  $cos_alpha 0);
          dragDir ($cos_alpha $sen_alpha  0);
          pitchAxis (0 0 1);
          magUInf $U_mag;

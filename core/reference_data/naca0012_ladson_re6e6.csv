@@ -1,0 +1,11 @@
+# NACA 0012 experimental data, Re = 6,000,000, Mach = 0.15, chord = 1 m.
+# Source: Ladson, C.L., "Effects of Independent Variation of Mach and Reynolds
+# Numbers on the Low-Speed Aerodynamic Characteristics of the NACA 0012
+# Airfoil Section," NASA TM 4074, October 1988. Also used as the standard
+# reference case by NASA's Turbulence Modeling Resource for NACA 0012 CFD
+# validation. To match this Reynolds number in the app: nu=1e-5, velocity=60 m/s.
+alpha,Cl,Cd
+0,-0.00724,0.00809
+5,0.536,0.00852
+10,1.057,0.0119
+15,1.49,0.0183

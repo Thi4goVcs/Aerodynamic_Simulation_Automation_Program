@@ -25,6 +25,15 @@ os.chdir(APP_DIR)
 sys.path.insert(0, os.path.join(APP_DIR, "core"))
 import functions  # type: ignore
 
+# Freestream nut/nuTilda default for the SA turbulence model: turbulent-viscosity
+# ratio (nut/nu) of 5, the standard "fully turbulent, low ambient turbulence"
+# setting recommended for external-aero SA cases. The old hardcoded default
+# (0.14, independent of nu) gave a ratio of ~14,000 at nu=1e-5 -- several
+# orders of magnitude too high -- which flooded the whole domain with
+# non-physical eddy viscosity and was the main cause of the ~2x-6x drag
+# overprediction found during NACA 0012 literature validation.
+DEFAULT_NUT_NUTILDA = 5 * 1e-5
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -120,6 +129,7 @@ class App:
         self.entries = {}  # Inicializando o dicionário aqui
         self.parallel_var = tk.BooleanVar(value=False)  # sequencial por padrão
         self.env_status = {"checked": False, "wsl_ok": False, "openfoam_ok": False, "detail": ""}
+        self.last_validation = None
         self._env_banner = None
 
         self.master.title("Aerodynamic Simulation Automation Program")
@@ -807,6 +817,8 @@ class App:
             nut_value = self.nut_var.get()
             nutilda_value = self.nutilda_var.get()
             nu_value_I = self.nu_var_I.get()
+            standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_I)
+            standard_expansion_ratio = functions.expansion_ratio_for_flow(flow_speed, nu_value_I)
         elif self.simulation_tipo == "Compressible":
             flow_speed = self.flow_speed_var_c.get()
             Pressure = self.p_var_c.get()
@@ -816,6 +828,8 @@ class App:
             alphat_value = self.alphat_var.get()
             T_value = self.t_var.get()
             k_value = self.k_var.get()
+            standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_c)
+            standard_expansion_ratio = functions.expansion_ratio_for_flow(flow_speed, nu_value_c)
 
         for angle in self.angles:
             angle_directory_path = os.path.join(base_directory, f"Angle_{angle}")
@@ -825,7 +839,8 @@ class App:
 
             try:
                 if self.mesh_choice == "standard_mesh":
-                    functions.blockMeshDirect(angle)
+                    functions.blockMeshDirect(angle, first_layer_thickness=standard_first_layer,
+                                               expansion_ratio=standard_expansion_ratio)
                 elif self.mesh_choice == "custom_mesh":
                     distance_to_inlet_val = self.distance_to_inlet.get()
                     distance_to_outlet_val = self.distance_to_outlet.get()
@@ -898,17 +913,37 @@ class App:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-        fig = Figure(figsize=(6, 3), dpi=100)
-        fig.patch.set_facecolor("#2b2b2b")
-        self._live_plot_ax = fig.add_subplot(111)
-        self._live_plot_ax.set_facecolor("#1e1e1e")
-        placeholder = ("Live convergence plot isn't shown for parallel runs (it would add extra WSL "
-                        "polling on top of an already CPU-heavy run)." if self.parallel_var.get()
-                        else "Waiting for solver output...")
-        self._live_plot_ax.set_title(placeholder, color="white", fontsize=9, wrap=True)
-        self._live_plot_ax.tick_params(colors="white", labelsize=8)
-        for spine in self._live_plot_ax.spines.values():
-            spine.set_color("#555555")
+        # Parallel runs get one small subplot per angle (laid out in a grid)
+        # instead of a single plot, since several angles converge at once.
+        self._live_plot_grid_mode = self.parallel_var.get() and len(self.angles) > 1
+        self._live_plot_axes = {}
+
+        if self._live_plot_grid_mode:
+            n = len(self.angles)
+            cols = min(4, n)
+            rows = -(-n // cols)  # ceil division
+            fig = Figure(figsize=(3.1 * cols, 2.3 * rows), dpi=100)
+            fig.patch.set_facecolor("#2b2b2b")
+            for i, angle in enumerate(self.angles):
+                ax = fig.add_subplot(rows, cols, i + 1)
+                ax.set_facecolor("#1e1e1e")
+                ax.set_title(f"{angle:g}° — waiting...", color="white", fontsize=8)
+                ax.tick_params(colors="white", labelsize=6)
+                for spine in ax.spines.values():
+                    spine.set_color("#555555")
+                self._live_plot_axes[angle] = ax
+            fig.tight_layout(pad=1.4)
+        else:
+            fig = Figure(figsize=(6, 3), dpi=100)
+            fig.patch.set_facecolor("#2b2b2b")
+            ax = fig.add_subplot(111)
+            ax.set_facecolor("#1e1e1e")
+            ax.set_title("Waiting for solver output...", color="white", fontsize=9, wrap=True)
+            ax.tick_params(colors="white", labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color("#555555")
+            self._live_plot_axes["single"] = ax
+
         self._live_plot_canvas = FigureCanvasTkAgg(fig, master=parent)
         self._live_plot_canvas.draw()
         self._live_plot_canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
@@ -917,15 +952,21 @@ class App:
         canvas = getattr(self, "_live_plot_canvas", None)
         if canvas is None or not canvas.get_tk_widget().winfo_exists():
             return
-        ax = self._live_plot_ax
+        axes = getattr(self, "_live_plot_axes", {})
+        grid_mode = getattr(self, "_live_plot_grid_mode", False)
+        ax = axes.get(angle) if grid_mode else axes.get("single")
+        if ax is None:
+            return
         ax.clear()
-        ax.plot(data["time"], data["cd"], color="#4da3ff", label="Cd")
-        ax.plot(data["time"], data["cl"], color="#e0a030", label="Cl")
-        ax.set_title(f"Angle {angle:g}° — live convergence", color="white", fontsize=10)
-        ax.set_xlabel("Iteration", color="white", fontsize=8)
+        ax.plot(data["time"], data["cd"], color="#4da3ff", label="Cd", linewidth=1.2 if grid_mode else 1.6)
+        ax.plot(data["time"], data["cl"], color="#e0a030", label="Cl", linewidth=1.2 if grid_mode else 1.6)
+        ax.set_title(f"{angle:g}°" if grid_mode else f"Angle {angle:g}° — live convergence",
+                     color="white", fontsize=8 if grid_mode else 10)
+        if not grid_mode:
+            ax.set_xlabel("Iteration", color="white", fontsize=8)
         ax.set_facecolor("#1e1e1e")
-        ax.legend(fontsize=8, loc="upper right", facecolor="#2b2b2b", labelcolor="white")
-        ax.tick_params(colors="white", labelsize=8)
+        ax.legend(fontsize=6 if grid_mode else 8, loc="upper right", facecolor="#2b2b2b", labelcolor="white")
+        ax.tick_params(colors="white", labelsize=6 if grid_mode else 8)
         for spine in ax.spines.values():
             spine.set_color("#555555")
         canvas.draw_idle()
@@ -995,7 +1036,13 @@ class App:
         def run_one(angle):
             angle_directory = os.path.join(base_directory, f"Angle_{angle}")
             os.makedirs(angle_directory, exist_ok=True)
-            return angle, self.run_commands_in_wsl(angle_directory)
+            stop_poll = threading.Event()
+            poll_thread = threading.Thread(target=self._poll_live_coefficients,
+                                            args=(angle_directory, angle, stop_poll), daemon=True)
+            poll_thread.start()
+            success = self.run_commands_in_wsl(angle_directory)
+            stop_poll.set()
+            return angle, success
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(run_one, angle) for angle in self.angles]
@@ -1023,6 +1070,14 @@ class App:
             ctk.CTkLabel(card, font=FONT_LABEL, text_color=RUN_COLOR,
                          text=f"✓ All {len(self.angles)} simulation(s) completed successfully.") \
                 .pack(padx=20, pady=20)
+
+        if self.last_validation:
+            avg_err = self.last_validation["summary"]["rel_error_pct"].mean()
+            ctk.CTkLabel(card, justify="left", wraplength=600, font=FONT_HINT, text_color=MUTED_TEXT,
+                         text=f"Validated against a bundled reference dataset — average difference "
+                              f"{avg_err:.1f}% across the matching angles. See the \"validation_*\" "
+                              f"plots in View Results for details.\nSource: {self.last_validation['citation']}") \
+                .pack(padx=20, pady=(0, 16))
 
         actions = ctk.CTkFrame(self.container, fg_color="transparent")
         actions.pack(fill="x", padx=30, pady=(10, 20), side="bottom")
@@ -1130,8 +1185,8 @@ class App:
             if flow_i:
                 self.flow_speed_var_I = tk.DoubleVar(value=flow_i.get("velocity", 0.0))
                 self.p_var_I = tk.DoubleVar(value=flow_i.get("p", 0.0))
-                self.nut_var = tk.DoubleVar(value=flow_i.get("nut", 0.14))
-                self.nutilda_var = tk.DoubleVar(value=flow_i.get("nutilda", 0.14))
+                self.nut_var = tk.DoubleVar(value=flow_i.get("nut", DEFAULT_NUT_NUTILDA))
+                self.nutilda_var = tk.DoubleVar(value=flow_i.get("nutilda", DEFAULT_NUT_NUTILDA))
                 self.nu_var_I = tk.DoubleVar(value=flow_i.get("nu", 1e-5))
 
             flow_c = preset.get("flow_compressible")
@@ -1262,8 +1317,8 @@ class App:
         if not hasattr(self, "flow_speed_var_I"):
             self.flow_speed_var_I = tk.DoubleVar()
             self.p_var_I = tk.DoubleVar(value=0.0)
-            self.nut_var = tk.DoubleVar(value=0.14)
-            self.nutilda_var = tk.DoubleVar(value=0.14)
+            self.nut_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
+            self.nutilda_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
             self.nu_var_I = tk.DoubleVar(value=1e-5)
 
         card = self._card(self.container)
@@ -1294,8 +1349,8 @@ class App:
     def toggle_additional_fields(self):
         if self.additional_fields_frame.winfo_ismapped():
             self.additional_fields_frame.pack_forget()  # Esconde os campos
-            self.nut_var.set(0.14)  # Define valores padrão caso escondido
-            self.nutilda_var.set(0.14)
+            self.nut_var.set(DEFAULT_NUT_NUTILDA)  # Define valores padrão caso escondido
+            self.nutilda_var.set(DEFAULT_NUT_NUTILDA)
             self.p_var_I.set(0.0)
             self.nu_var_I.set(1e-5)
         else:
@@ -1412,7 +1467,8 @@ class App:
                 row_values = [summary["last_time"]] + summary["averaged"] + yplus_values + [int(summary["converged"])]
                 results_file.write("\t".join(f"{v:.6e}" if isinstance(v, float) else str(v) for v in row_values) + "\n")
 
-        functions.plot_data_from_txt(results_path)
+        naca_code = self.naca_var.get() if self.airfoil == "airfoil_NACA" else None
+        self.last_validation = functions.plot_data_from_txt(results_path, naca_code=naca_code)
 
 
 if __name__ == "__main__":
