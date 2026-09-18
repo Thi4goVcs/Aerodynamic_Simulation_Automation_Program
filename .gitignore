@@ -1,8 +1,15 @@
 # PyInstaller build output (see build_exe.bat / README.md)
 /build/
 /dist/
+/dist_package/
 *.spec
 *.exe
+*.zip
 
 __pycache__/
 *.pyc
+
+# Raw mesh-quality-sweep output (regenerate with tools/mesh_quality_sweep.py --
+# see docs/MESH_QUALITY_STUDY.md). The scripts and the write-up are tracked,
+# the generated logs/dicts/csvs are not.
+/studies/

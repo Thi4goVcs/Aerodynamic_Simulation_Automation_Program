@@ -62,6 +62,12 @@ wsl --install -d Ubuntu-22.04
 Restart when prompted, then finish the Ubuntu first-run setup (create a
 username/password inside WSL).
 
+> **Shortcut:** `setup_openfoam.bat` in this repo automates steps 1 and 2 as
+> much as they can be automated (it still needs your input for the Windows
+> restart, the Ubuntu first-run username/password, and your `sudo` password).
+> Run it, follow its prompts, and skip to step 3 once it says OpenFOAM is
+> installed.
+
 ### 2. Install OpenFOAM v2212 inside WSL
 
 Open your WSL/Ubuntu terminal and run:
