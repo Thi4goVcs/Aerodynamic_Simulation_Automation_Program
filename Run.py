@@ -85,11 +85,15 @@ WIZARD_STEPS = ["Setup", "Mesh", "Preview", "Type", "Flow", "Run", "Results"]
 # a hover tooltip next to its value -- otherwise the raw numbers (e.g. "Max
 # non-orthogonality: 88.32") give no sense of whether that's fine or a
 # problem.
+YPLUS_HELP = ("Average wall y+ the standard mesh is sized for. The default (33.41) is the value validated "
+              "against wind-tunnel data. Use ~1 to resolve the boundary layer down to the wall: it runs "
+              "slower and, in our tests, did not improve the drag.")
+
 MESH_METRIC_HELP = {
     "Cells": "Total number of mesh cells. Just the mesh size, not a quality judgment "
              "by itself -- more cells means more resolution but longer solve times.",
     "Points": "Total number of mesh vertices. Informational only.",
-    "Max non-orthogonality": "Lower is better. Angle between the line joining two cell "
+    "Max non-orthogonality": "Lower is better. The standard mesh sits around 57-64°. Angle between the line joining two cell "
                               "centers and the face normal between them. OpenFOAM flags "
                               "faces above 70° as severely non-orthogonal -- keep the "
                               "max comfortably below that for reliable convergence.",
@@ -108,10 +112,15 @@ MESH_METRIC_HELP = {
 # rest falls back to filename order.
 RESULT_PLOT_ORDER = ["polar_Cl_Cd", "efficiency_Cl_Cd", "Cl", "Cd", "CmPitch", "CmRoll", "CmYaw", "Cs"]
 
+# blockMeshDirect_Custom still takes a first-layer size, but since the grading seam fix it
+# no longer changes the mesh (checked: 4e-6, 1e-8 and 3e-3 give byte-identical files), so the
+# GUI no longer asks for it. Old presets that carry the key simply have it ignored.
+CUSTOM_MESH_FIRST_LAYER = 4e-6
+
 CUSTOM_MESH_PARAM_NAMES = [
     "distance_to_inlet", "distance_to_outlet", "cell_size_at_leading_edge",
     "cell_size_at_trailing_edge", "cell_size_in_middle", "separating_point_position",
-    "boundary_layer_thickness", "first_layer_thickness", "expansion_ratio",
+    "boundary_layer_thickness", "expansion_ratio",
     "max_cell_size_in_inlet", "max_cell_size_in_outlet", "max_cell_size_in_inlet_and_outlet",
     "num_mesh_on_boundary_layer_1", "num_mesh_on_boundary_layer_2", "num_mesh_at_tail",
     "num_mesh_in_leading", "num_mesh_in_trailing",
@@ -291,9 +300,17 @@ class App:
         opts.update(kwargs)
         return ctk.CTkEntry(parent, **opts)
 
-    def _labeled_entry(self, parent, label_text, variable, hint=None):
+    def _labeled_entry(self, parent, label_text, variable, hint=None, help_text=None):
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        self._caps_label(wrap, label_text).pack(fill="x")
+        if help_text:
+            head = ctk.CTkFrame(wrap, fg_color="transparent")
+            head.pack(fill="x")
+            self._caps_label(head, label_text).pack(side="left")
+            icon = ctk.CTkLabel(head, text=" ⓘ", font=FONT_HINT, text_color=MUTED, cursor="hand2")
+            icon.pack(side="left")
+            _Tooltip(icon, help_text)
+        else:
+            self._caps_label(wrap, label_text).pack(fill="x")
         entry = self._entry(wrap, variable)
         entry.pack(fill="x", pady=(4, 0))
         if hint:
@@ -435,7 +452,10 @@ class App:
                                        placeholder_text="0, 2.5, 5, 10")
         self.angle_entry.pack(fill="x", padx=18)
         self._chips_row = ctk.CTkFrame(card, fg_color="transparent")
-        self._chips_row.pack(fill="x", padx=18, pady=(8, 16))
+        self._chips_row.pack(fill="x", padx=18, pady=(8, 4))
+        self._angle_note = ctk.CTkLabel(card, text="", font=FONT_HINT, text_color=ALERT_TEXT, anchor="w",
+                                        justify="left", wraplength=380)
+        self._angle_note.pack(fill="x", padx=18, pady=(0, 12))
 
         # ---- profile preview card ---------------------------------------
         side = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
@@ -534,6 +554,10 @@ class App:
         ctk.CTkLabel(self._chips_row, text=("   " if n else "") + note, font=FONT_HINT,
                      text_color=MUTED).pack(side="left")
         self._cases_stat.configure(text=str(n))
+        high = [a for a in angles if abs(a) >= 12]
+        self._angle_note.configure(text=(
+            f"▲ {', '.join(f'{a:g}°' for a in high)}: close to stall. A steady-state solver may need many more "
+            "iterations here (the 15° case took ~3,000) or not settle at all.") if high else "")
         self._draw_profile()
 
     def _profile_points(self):
@@ -633,7 +657,6 @@ class App:
             self.cell_size_in_middle = tk.DoubleVar(value=0.035)
             self.separating_point_position = tk.DoubleVar(value=0.4)
             self.boundary_layer_thickness = tk.DoubleVar(value=0.2)
-            self.first_layer_thickness = tk.DoubleVar(value=0.000004)
             self.expansion_ratio = tk.DoubleVar(value=1.2)
             self.max_cell_size_in_inlet = tk.DoubleVar(value=1)
             self.max_cell_size_in_outlet = tk.DoubleVar(value=1)
@@ -657,7 +680,6 @@ class App:
             ]),
             ("Boundary layer", [
                 ("Boundary layer thickness", self.boundary_layer_thickness),
-                ("First layer thickness", self.first_layer_thickness),
                 ("Expansion ratio", self.expansion_ratio),
             ]),
             ("Max cell sizes", [
@@ -731,7 +753,8 @@ class App:
     # ------------------------------------------------------------------ #
     def mesh_preview_screen(self):
         self.clear_frame()
-        self._nav_bar(self.container, self.mesh_preview_back, "Continue →", self.choose_simulation_type)
+        self._mesh_qualities = {}
+        self._nav_bar(self.container, self.mesh_preview_back, "Continue →", self._continue_from_preview)
         self._header(self.container, "Mesh Preview",
                      "Review the mesh quality before running the simulation.", step=2)
 
@@ -752,6 +775,23 @@ class App:
 
         threading.Thread(target=self._generate_mesh_preview_worker,
                           args=(self._mesh_preview_angle,), daemon=True).start()
+
+    def _continue_from_preview(self):
+        problems = []
+        for angle, quality in getattr(self, "_mesh_qualities", {}).items():
+            if not quality.get("blockmesh_ok"):
+                problems.append(f"{angle:g}°: the mesh could not be generated")
+            elif not quality.get("mesh_ok"):
+                problems.append(f"{angle:g}°: checkMesh reported failures")
+            elif (quality.get("max_nonortho") or 0) > 70:
+                problems.append(f"{angle:g}°: max non-orthogonality {quality['max_nonortho']:.1f}° (above 70°)")
+        if problems and not messagebox.askyesno(
+                "Mesh quality warning",
+                "The previewed mesh has problems:\n\n" + "\n".join(problems) +
+                "\n\nThe standard mesh normally stays around 57-64°, so this usually means a custom "
+                "parameter needs a look. Continue to the simulation anyway?"):
+            return
+        self.choose_simulation_type()
 
     def mesh_preview_back(self):
         if self.mesh_choice == "custom_mesh":
@@ -783,7 +823,7 @@ class App:
                     angle, self.distance_to_inlet.get(), self.distance_to_outlet.get(),
                     self.cell_size_at_leading_edge.get(), self.cell_size_at_trailing_edge.get(),
                     self.cell_size_in_middle.get(), self.separating_point_position.get(),
-                    self.boundary_layer_thickness.get(), self.first_layer_thickness.get(),
+                    self.boundary_layer_thickness.get(), CUSTOM_MESH_FIRST_LAYER,
                     self.expansion_ratio.get(), self.max_cell_size_in_inlet.get(),
                     self.max_cell_size_in_outlet.get(), self.max_cell_size_in_inlet_and_outlet.get(),
                     self.num_mesh_on_boundary_layer_1.get(), self.num_mesh_on_boundary_layer_2.get(),
@@ -861,6 +901,7 @@ class App:
 
         quality = result["quality"]
         polygons = result["polygons"]
+        self._mesh_qualities[angle] = quality
 
         body = ctk.CTkFrame(self._mesh_preview_body, fg_color="transparent")
         body.pack(fill="both", expand=True)
@@ -1148,7 +1189,7 @@ class App:
                     cell_size_in_middle_val = self.cell_size_in_middle.get()
                     separating_point_position_val = self.separating_point_position.get()
                     boundary_layer_thickness_val = self.boundary_layer_thickness.get()
-                    first_layer_thickness_val = self.first_layer_thickness.get()
+                    first_layer_thickness_val = CUSTOM_MESH_FIRST_LAYER
                     expansion_ratio_val = self.expansion_ratio.get()
                     max_cell_size_in_inlet_val = self.max_cell_size_in_inlet.get()
                     max_cell_size_in_outlet_val = self.max_cell_size_in_outlet.get()
@@ -1357,17 +1398,18 @@ class App:
         top.pack(fill="x", padx=20, pady=(16, 0))
         self._detail_top = top
         titles = ctk.CTkFrame(top, fg_color="transparent")
-        titles.pack(side="left", fill="x", expand=True)
         self._detail_title = ctk.CTkLabel(titles, text="", font=(FONT_FAMILY, 19, "bold"),
                                           text_color=INK, anchor="w")
         self._detail_title.pack(fill="x")
-        self._detail_line = ctk.CTkLabel(titles, text="", font=(FONT_FAMILY, 12), text_color=MUTED, anchor="w")
+        self._detail_line = ctk.CTkLabel(titles, text="", font=(FONT_FAMILY, 12), text_color=MUTED, anchor="w",
+                                          justify="left", wraplength=380)
         self._detail_line.pack(fill="x", pady=(2, 0))
-        self._expand_btn = self._secondary_button(top, "Expand", self._toggle_expand, width=80, height=28,
+        self._expand_btn = self._secondary_button(top, "Expand", self._toggle_expand, width=92, height=28,
                                                   font=(FONT_FAMILY, 12))
         self._expand_btn.pack(side="right")
-        self._secondary_button(top, "Case log", self._toggle_log_drawer, width=80, height=28,
+        self._secondary_button(top, "Case log", self._toggle_log_drawer, width=92, height=28,
                                font=(FONT_FAMILY, 12)).pack(side="right", padx=(0, 8))
+        titles.pack(side="left", fill="x", expand=True)  # after the buttons, so they keep their width
 
         self._stuck_strip = ctk.CTkFrame(detail, corner_radius=8, fg_color=ALERT_TINT,
                                          border_width=1, border_color=ALERT_BORDER)
@@ -1520,8 +1562,18 @@ class App:
             message = {"preparing": "preparing case files",
                        "blockMesh": "generating mesh (blockMesh)",
                        "decomposePar": "splitting domain for the 2-process solve (decomposePar)",
-                       "reconstructPar": "solve finished, merging results (reconstructPar)"}.get(stage, stage)
+                       "reconstructPar": self._solve_stop_message(st)}.get(stage, stage)
         self._log_event(f"{angle:g}°: {message}")
+
+    def _solve_stop_message(self, st):
+        n, limit = st["iter"], st["max_iter"]
+        if limit and n < limit * 0.99:
+            why = f"stopped at iteration {n} (Cd and Cl settled; limit was {limit})"
+        elif limit:
+            why = f"reached the iteration limit ({limit}) without the stop criterion firing"
+        else:
+            why = f"finished at iteration {n}"
+        return f"solve {why}, merging results (reconstructPar)"
 
     def _progress_angle_started(self, angle):
         st = self._progress[angle]
@@ -1776,6 +1828,14 @@ class App:
             for spine in ax2.spines.values():
                 spine.set_visible(False)
             ax.set_xlabel("iteration", color=MUTED, fontsize=8)
+            # The first ~10% is start-up transient (Cl swings to -1 or worse); scale the axes
+            # to what comes after it so the part that shows convergence stays readable.
+            skip = max(2, len(iters) // 10)
+            for axis, series in ((ax, data["cd"]), (ax2, data["cl"])):
+                tail = list(series)[skip:] if len(series) > skip + 3 else list(series)
+                lo, hi = min(tail), max(tail)
+                pad = (hi - lo) * 0.15 or max(abs(hi) * 0.05, 1e-4)
+                axis.set_ylim(lo - pad, hi + pad)
             handles = ax.get_lines() + ax2.get_lines()
             ax.legend(handles, [h.get_label() for h in handles], loc="upper right", fontsize=8,
                       frameon=False, labelcolor=INK3)
@@ -1885,9 +1945,19 @@ class App:
             notes.append("Not fully converged: " + ", ".join(f"{a}°" for a in not_converged) +
                          " — treat their averages with care.")
         if self.last_validation:
-            avg_err = self.last_validation["summary"]["rel_error_pct"].mean()
-            notes.append(f"Compared with a bundled reference dataset: {avg_err:.1f}% average difference "
-                         f"({self.last_validation['citation']}).")
+            mean_err, used, excluded = functions.mean_validation_error(self.last_validation["summary"])
+            if mean_err is None:
+                notes.append("No converged angle to compare with the reference dataset.")
+            else:
+                extra = (f"; {excluded} point(s) left out: not converged or reference ~0" if excluded else "")
+                notes.append(f"Compared with a bundled reference dataset: {mean_err:.1f}% average difference over "
+                             f"{used} point(s){extra}. ({self.last_validation['citation']})")
+        target_var = getattr(self, "yplus_var_I" if self.simulation_tipo != "Compressible" else "yplus_var_c", None)
+        measured = [r["yplus"] for r in rows if r.get("yplus") is not None]
+        if target_var is not None and measured and self.mesh_choice == "standard_mesh":
+            target = self._safe_get(target_var)
+            if target:
+                notes.append(f"Wall y+ target {target:g}; measured average {sum(measured) / len(measured):.1f}.")
         if notes:
             ctk.CTkLabel(text, text="\n".join(notes), font=(FONT_FAMILY, 12), text_color=MUTED,
                          justify="left", anchor="w", wraplength=700).pack(fill="x")
@@ -1905,6 +1975,29 @@ class App:
             os.startfile(results_dir)
         else:
             messagebox.showinfo("Results Folder", "No results folder found yet.")
+
+    def _stop_info(self, case_name, last_time):
+        """(iterations run, iteration limit) for a case, from its controlDict."""
+        for base in (os.path.join(APP_DIR, "Simulations", case_name, "system", "controlDict"),
+                     os.path.join(APP_DIR, "core", "Standard", "Incompressible", "system", "controlDict")):
+            settings = functions.read_case_iteration_settings(base)
+            if settings:
+                delta_t, limit = settings
+                return int(round(last_time / delta_t)), limit
+        return None, None
+
+    @staticmethod
+    def _stop_text(row):
+        """Why the case ended, in words: the most useful column of the results table."""
+        iters, limit = row.get("iters"), row.get("limit")
+        if row["cd"] is None:
+            return "no results"
+        at_limit = bool(limit and iters is not None and iters >= limit * 0.99)
+        if row["converged"] and not at_limit:
+            return f"✓ converged · {iters} it"
+        if row["converged"]:
+            return f"✓ stable at limit · {iters} it"
+        return f"✕ not converged · {iters} it" + (" (limit)" if at_limit else "")
 
     def _read_results_table(self):
         """Rows of Results/results.txt as dicts (angle label, Cd, Cl, y+ avg, converged)."""
@@ -1927,12 +2020,14 @@ class App:
             except ValueError:
                 continue
             cd, cl, yplus, conv = numbers[1], numbers[4], numbers[13], numbers[15]
+            iters, limit = self._stop_info(name, numbers[0])
             if cd != cd:  # nan: no coefficients were produced for this angle
                 rows.append(dict(angle=name.replace("Angle_", ""), cd=None, cl=None, ld=None,
-                                 yplus=None, converged=False))
+                                 yplus=None, converged=False, iters=None, limit=None))
                 continue
             rows.append(dict(angle=name.replace("Angle_", ""), cd=cd, cl=cl,
-                             ld=(cl / cd if cd else None), yplus=yplus, converged=bool(conv)))
+                             ld=(cl / cd if cd else None), yplus=yplus, converged=bool(conv),
+                             iters=iters, limit=limit))
         return rows
 
     def _build_results_body(self, parent, rows=None):
@@ -1947,10 +2042,10 @@ class App:
 
         # ---- coefficients table -------------------------------------------
         if rows:
-            table = ctk.CTkScrollableFrame(body, corner_radius=11, fg_color=CARD, width=450)
+            table = ctk.CTkScrollableFrame(body, corner_radius=11, fg_color=CARD, width=520)
             table.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-            headers = ["Angle", "Cd", "Cl", "Cl/Cd", "y+ avg", "Converged"]
-            widths = [60, 74, 74, 66, 60, 100]
+            headers = ["Angle", "Cd", "Cl", "Cl/Cd", "y+ avg", "How it ended"]
+            widths = [56, 70, 70, 56, 56, 176]
             for col, (h, w) in enumerate(zip(headers, widths)):
                 self._caps_label(table, h, width=w).grid(row=0, column=col, sticky="w", padx=(8, 0), pady=(8, 6))
             for r, row in enumerate(rows, start=1):
@@ -1962,11 +2057,10 @@ class App:
                     ctk.CTkLabel(table, text=text, width=widths[col], anchor="w",
                                  font=(FONT_MONO, 13), text_color=INK if col == 0 else INK2) \
                         .grid(row=r, column=col, sticky="w", padx=(8, 0), pady=3)
-                if row["converged"]:
-                    ctk.CTkLabel(table, text="✓ yes", font=(FONT_MONO, 13), text_color=INK2, anchor="w",
-                                 width=widths[5]).grid(row=r, column=5, sticky="w", padx=(8, 0))
-                else:
-                    self._chip(table, "✕ no", fg=ALERT, text_color=BG).grid(row=r, column=5, sticky="w", padx=(8, 0))
+                ok = row["converged"]
+                ctk.CTkLabel(table, text=self._stop_text(row), font=(FONT_MONO, 12), anchor="w",
+                             text_color=INK2 if ok else ALERT_TEXT, width=widths[5]) \
+                    .grid(row=r, column=5, sticky="w", padx=(8, 0))
 
         # ---- plots --------------------------------------------------------
         plots_dir = os.path.join(APP_DIR, "plots")
@@ -2228,7 +2322,10 @@ class App:
                 return
             temp = self._safe_get(temperature_var, 288.15) if temperature_var is not None else 288.15
             sound = (1.4 * 287.05 * max(temp, 1.0)) ** 0.5
-            helper.configure(text=f"Re ≈ {u / nu:,.0f}  (chord = 1 m)   ·   Mach ≈ {abs(u) / sound:.2f}")
+            text = f"Re ≈ {u / nu:,.0f}  (chord = 1 m)   ·   Mach ≈ {abs(u) / sound:.2f}"
+            if u / nu < 9e5:
+                text += "\nLow Re: below ~9e5 the wall refinement stays fixed (uniform boundary-layer cells)."
+            helper.configure(text=text, justify="left")
 
         for var in (speed_var, nu_var) + ((temperature_var,) if temperature_var is not None else ()):
             self._watch(var, update_helper)
@@ -2250,8 +2347,9 @@ class App:
         grid = ctk.CTkFrame(self._adv_frame, fg_color="transparent")
         grid.pack(fill="x", padx=12, pady=12)
         grid.grid_columnconfigure(tuple(range(adv_columns)), weight=1)
-        for idx, (label, var) in enumerate(adv_fields):
-            w, _ = self._labeled_entry(grid, label, var)
+        for idx, field in enumerate(adv_fields):
+            label, var = field[0], field[1]
+            w, _ = self._labeled_entry(grid, label, var, help_text=field[2] if len(field) > 2 else None)
             w.grid(row=idx // adv_columns, column=idx % adv_columns, sticky="ew", padx=6, pady=6)
         self._adv_anchor = ctk.CTkFrame(left, height=1, fg_color="transparent")
         self._adv_anchor.pack(fill="x")
@@ -2313,7 +2411,7 @@ class App:
             "Incompressible Simulation", self.Simulation_Incompressible,
             self.flow_speed_var_I, self.nu_var_I, [],
             [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var), ("Nutilda", self.nutilda_var),
-             ("Wall y+ target", self.yplus_var_I)],
+             ("Wall y+ target", self.yplus_var_I, YPLUS_HELP)],
             adv_columns=4, reset_advanced=self.toggle_additional_fields_reset)
 
     def toggle_additional_fields_reset(self):
@@ -2340,7 +2438,7 @@ class App:
             self.flow_speed_var_c, self.nu_var_c,
             [("P (pressure)", self.p_var_c), ("T (temperature K)", self.t_var)],
             [("Alphat", self.alphat_var), ("k", self.k_var), ("Nut", self.nut_var_c),
-             ("Omega", self.omega_var), ("Nu", self.nu_var_c), ("Wall y+ target", self.yplus_var_c)],
+             ("Omega", self.omega_var), ("Nu", self.nu_var_c), ("Wall y+ target", self.yplus_var_c, YPLUS_HELP)],
             adv_columns=3, reset_advanced=self.toggle_additional_fields_compressive_reset,
             temperature_var=self.t_var)
 

@@ -147,7 +147,9 @@ above — in a background thread so the window stays responsive.
 
 The progress screen shows, for every angle, which stage it is in (meshing,
 splitting the domain, solving, merging results), the current iteration out of
-the maximum (e.g. `600/2000`) and an estimated time remaining. The large
+the limit (e.g. `600/4000`) and an estimated time remaining. The limit is only a
+ceiling: a run stops by itself as soon as Cd and Cl settle (see "When a run stops"
+below), so the estimate is shown as "up to". The large
 **Remaining** figure at the top is the estimate for the whole run; in parallel
 mode it accounts for angles still waiting for a free solver slot (see the
 **Queue** card). Click any angle in the list to see its live Cd/Cl convergence
@@ -164,12 +166,31 @@ Results** shortcut once a run exists, so you can revisit it anytime.
 
 ## 6. Results
 
+### When a run stops
+
+A case ends when **Cd and Cl stop moving**: each one must stay within an absolute
+tolerance (Cd 1e-4, Cl 1e-3) of its own 200-iteration moving average, after at
+least 500 iterations. This is the `convergenciaCoeficientes` block in
+`system/forces`; unlike a residual target it does not depend on the mesh. The
+iteration limit (`endTime` 4 = 4000 iterations at `deltaT` 0.001) is only a
+safety ceiling. The results table's **How it ended** column says which happened:
+`converged · 830 it`, `stable at limit`, or `not converged (limit)`. Angles close
+to stall (roughly 12° and up for a NACA 0012) can need thousands of iterations;
+the 15° case took ~3,250.
+
+### Averages and validation
+
 Each coefficient is averaged over the last 20% of the solver's iterations
 (not just the final sample), which is less sensitive to residual solver
 noise. An angle is flagged as **not fully converged** if Cd or Cl still
 changed by more than ~2% (relative) or a small absolute tolerance across
 that averaging window — the underlying flow hadn't fully settled by the
 end of the run for that angle.
+
+When the run is compared with the bundled reference data, the average difference
+leaves out angles that did not converge (drawn as red × in the validation plots) and
+points whose reference value is near zero (e.g. Cl at 0°, where a tiny absolute
+difference becomes a huge percentage).
 
 - `Results/results.txt` — one row per angle with `Time, Cd, Cd(f), Cd(r),
   Cl, Cl(f), Cl(r), CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r), yPlus_avg,
@@ -214,9 +235,9 @@ end of the run for that angle.
   the number of angles — each is solved as an independent case.
 - Close `plots/data.xlsx` before starting a new simulation; the app
   rewrites it on every run and Excel keeps the file locked while open.
-- To change the number of solver iterations, edit `endTime` or `deltaT` in
+- To change the iteration ceiling, edit `endTime` or `deltaT` in
   the relevant case's `system/controlDict` under `core/Standard/Incompressible`
-  or `core/Standard/Compressible`.
+  or `core/Standard/Compressible`; the stop tolerances live in `system/forces`.
 
 ## Citation
 

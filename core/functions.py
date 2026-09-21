@@ -1435,7 +1435,8 @@ def plot_data_from_txt(file_path, output_dir='plots', naca_code=None):
     if naca_code:
         reference_path = find_reference_dataset(naca_code)
         if reference_path:
-            validation_result = plot_validation(data, reference_path, output_dir)
+            validation_result = plot_validation(data, reference_path, output_dir,
+                                                converged=converged_mask)
     return validation_result
 
 
@@ -1452,7 +1453,7 @@ def find_reference_dataset(naca_code):
     return os.path.join(ref_dir, matches[0]) if matches else None
 
 
-def plot_validation(data, reference_path, output_dir):
+def plot_validation(data, reference_path, output_dir, converged=None):
     """Overlays this run's simulated Cl/Cd vs. angle of attack against a
     bundled experimental/reference dataset, for whichever angles were run
     that also exist in the reference, and reports the relative difference.
@@ -1475,6 +1476,8 @@ def plot_validation(data, reference_path, output_dir):
         citation_lines = [line.lstrip('#').strip() for line in f if line.startswith('#')]
     citation = ' '.join(citation_lines) if citation_lines else os.path.basename(reference_path)
 
+    if converged is None:
+        converged = pd.Series(True, index=data.index)
     summary_rows = []
     for coeff in ('Cl', 'Cd'):
         if coeff not in data.columns:
@@ -1484,6 +1487,10 @@ def plot_validation(data, reference_path, output_dir):
                   color='#1f6fb2', label='Simulated (this run)', zorder=2)
         plt.plot(ref.index, ref[coeff], marker='s', markersize=6, linewidth=1.8,
                   linestyle='--', color='#e0a030', label='Reference (experimental)', zorder=2)
+        unconverged = ~converged.reindex(data.index).fillna(False).astype(bool)
+        if unconverged.any():
+            plt.scatter(data.index[unconverged], data[coeff][unconverged], marker='x', s=110,
+                        linewidths=2.4, color='#d1432b', zorder=3, label='not converged')
         plt.title(f'{coeff} vs. Angle of Attack -- Validation')
         plt.xlabel('alpha (deg)')
         plt.ylabel(coeff)
@@ -1497,7 +1504,8 @@ def plot_validation(data, reference_path, output_dir):
             ref_v = float(ref.loc[alpha, coeff])
             rel_err = abs(sim_v - ref_v) / abs(ref_v) * 100 if ref_v != 0 else float('nan')
             summary_rows.append({'alpha': alpha, 'coeff': coeff, 'simulated': sim_v,
-                                  'reference': ref_v, 'rel_error_pct': rel_err})
+                                  'reference': ref_v, 'rel_error_pct': rel_err,
+                                  'converged': bool(converged.get(alpha, True))})
 
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(os.path.join(output_dir, 'validation_summary.csv'), index=False)
@@ -1670,3 +1678,18 @@ def build_mesh_wireframe(points_text, faces_text, boundary_text, patch_name="fro
     return polygons
 
 
+
+
+def mean_validation_error(summary, min_abs_reference=0.05):
+    """Average relative error of a validation summary, counting only angles that
+    converged and whose reference value is not near zero (a tiny denominator,
+    e.g. Cl at 0 deg, turns a negligible absolute difference into a huge %).
+    Returns (mean_pct or None, n_used, n_excluded)."""
+    if summary is None or len(summary) == 0:
+        return None, 0, 0
+    conv = summary["converged"] if "converged" in summary.columns else True
+    keep = conv & (summary["reference"].abs() >= min_abs_reference) & summary["rel_error_pct"].notna()
+    used = summary[keep]
+    if used.empty:
+        return None, 0, len(summary)
+    return float(used["rel_error_pct"].mean()), len(used), len(summary) - len(used)
