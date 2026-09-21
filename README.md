@@ -24,7 +24,8 @@ at the University of Brasília (UnB).
 - Compressible and incompressible flow simulation setups
 - Runs simulations for multiple angles of attack in one go, sequentially or
   in parallel (with a concurrency cap so it doesn't overload the machine)
-- Live Cd/Cl convergence plot while a sequential run is in progress
+- Progress screen with per-angle stage, iteration counter, time-remaining estimate,
+  stuck-case warning, event log and a live Cd/Cl convergence plot (sequential or parallel)
 - Extracts Cd, Cl, Cm and side-force coefficients and plots them automatically
 - Browse the result plots right inside the app (no need to open the `plots/`
   folder separately)

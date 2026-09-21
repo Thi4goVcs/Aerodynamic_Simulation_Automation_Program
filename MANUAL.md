@@ -145,11 +145,15 @@ above — in a background thread so the window stays responsive.
 
 ![Simulation progress](docs/screenshot_progress.png)
 
-For a sequential run, the progress screen also plots Cd/Cl live as the
-solver iterates (read from the running case's `coefficient.dat` every few
-seconds), so you can see convergence happening instead of just a percentage.
-This is skipped for parallel runs to avoid adding more WSL polling on top of
-an already CPU-heavy run.
+The progress screen shows, for every angle, which stage it is in (meshing,
+splitting the domain, solving, merging results), the current iteration out of
+the maximum (e.g. `600/2000`) and an estimated time remaining. The large
+**Remaining** figure at the top is the estimate for the whole run; in parallel
+mode it accounts for angles still waiting for a free solver slot (see the
+**Queue** card). Click any angle in the list to see its live Cd/Cl convergence
+plot (read from the running case's `coefficient.dat` every few seconds). A case
+that makes no progress for 2 minutes while solving is flagged **STUCK**, and
+a running log of events sits at the bottom (**Open full log** expands it).
 
 When it finishes, you'll see a summary with buttons to open the results
 folder, or to **View Results** right inside the app — a plot picker plus the

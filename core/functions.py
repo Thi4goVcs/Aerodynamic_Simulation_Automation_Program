@@ -1008,6 +1008,143 @@ def parse_live_coefficients(raw_text):
     return {"time": df.iloc[:, 0].tolist(), "cd": df.iloc[:, 1].tolist(), "cl": df.iloc[:, 4].tolist()}
 
 
+PROGRESS_STAGE_ORDER = ("blockMesh", "decomposePar", "simpleFoam", "reconstructPar")
+
+# Where each pipeline stage sits on the 0..1 progress bar of one angle. The
+# solver dominates the wall time, so it gets most of the range and moves with
+# the iteration count; the other stages are short fixed slices.
+_STAGE_FRACTION = {"queued": 0.0, "preparing": 0.01, "blockMesh": 0.03, "decomposePar": 0.07,
+                   "reconstructPar": 0.96, "done": 1.0, "failed": 1.0}
+_SOLVER_START, _SOLVER_SPAN = 0.08, 0.87
+
+
+def build_progress_poll_command(run_ids):
+    """Single bash command reporting, for every run, which OpenFOAM stage logs
+    exist, the last solver 'Time =' line and the forceCoeffs file. One wsl call
+    for all runs keeps the polling cost flat however many angles run at once."""
+    ids = " ".join(f'"{run_id}"' for run_id in run_ids)
+    return (
+        f'for id in {ids}; do d="/tmp/aero_sim_$id"; [ -d "$d" ] || continue; '
+        'echo "@@ID $id"; '
+        'for l in blockMesh decomposePar simpleFoam reconstructPar; do '
+        '[ -f "$d/log.$l" ] && echo "@@LOG $l"; done; '
+        't=$(tail -c 30000 "$d/log.simpleFoam" 2>/dev/null | grep -a "^Time = " | tail -n 1); '
+        'echo "@@TIME ${t#Time = }"; '
+        'echo "@@COEFF"; cat "$d/postProcessing/forceCoeffs/0/coefficient.dat" 2>/dev/null; '
+        'echo "@@END"; done'
+    )
+
+
+def parse_progress_snapshot(raw_text):
+    """Parses the output of build_progress_poll_command into
+    {run_id: {"stages": [...], "time": float | None, "coeff": str}}."""
+    runs = {}
+    current = None
+    coeff_lines = None
+    for line in raw_text.splitlines():
+        line = line.rstrip("\r")
+        if line.startswith("@@ID "):
+            current = {"stages": [], "time": None, "coeff": ""}
+            runs[line[5:].strip()] = current
+            coeff_lines = None
+        elif current is None:
+            continue
+        elif line.startswith("@@LOG "):
+            current["stages"].append(line[6:].strip())
+        elif line.startswith("@@TIME"):
+            try:
+                current["time"] = float(line[6:].strip())
+            except ValueError:
+                current["time"] = None
+        elif line == "@@COEFF":
+            coeff_lines = []
+        elif line == "@@END":
+            if coeff_lines is not None:
+                current["coeff"] = "\n".join(coeff_lines)
+            coeff_lines = None
+        elif coeff_lines is not None:
+            coeff_lines.append(line)
+    return runs
+
+
+def stage_from_logs(stages):
+    """Latest pipeline stage whose log file exists ('preparing' if none yet)."""
+    for name in reversed(PROGRESS_STAGE_ORDER):
+        if name in stages:
+            return name
+    return "preparing"
+
+
+def read_case_iteration_settings(control_dict_path):
+    """(delta_t, max_iterations) from a case's controlDict, or None. For a
+    steady simpleFoam case the 'time' is just iteration * deltaT."""
+    try:
+        with open(control_dict_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    number = r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)'
+    end_match = re.search(r'^\s*endTime\s+' + number + r'\s*;', text, re.M)
+    step_match = re.search(r'^\s*deltaT\s+' + number + r'\s*;', text, re.M)
+    if not end_match or not step_match:
+        return None
+    end_time, delta_t = float(end_match.group(1)), float(step_match.group(1))
+    if delta_t <= 0:
+        return None
+    return delta_t, max(1, round(end_time / delta_t))
+
+
+def run_progress_fraction(stage, iteration, max_iterations):
+    """0..1 progress of one angle from its pipeline stage and solver iteration."""
+    if stage == "simpleFoam":
+        done = min(1.0, iteration / max_iterations) if max_iterations else 0.0
+        return _SOLVER_START + _SOLVER_SPAN * done
+    return _STAGE_FRACTION.get(stage, 0.0)
+
+
+def iteration_rate(samples, window_seconds=90.0):
+    """Solver iterations per second from [(monotonic_seconds, iteration), ...]
+    over the recent window, or None while there isn't enough data yet."""
+    if len(samples) < 2:
+        return None
+    t_end, it_end = samples[-1]
+    t_start, it_start = samples[0]
+    for t, it in samples:
+        if t_end - t <= window_seconds:
+            t_start, it_start = t, it
+            break
+    elapsed, advanced = t_end - t_start, it_end - it_start
+    if elapsed < 5 or advanced <= 0:
+        return None
+    return advanced / elapsed
+
+
+def estimate_total_eta(running_seconds, queued_count, queued_seconds_each, slots):
+    """Seconds until every angle finishes, given how long each running angle
+    still needs, how many are still queued, how long a queued one takes and how
+    many can run at once (queued angles take the first slot that frees up)."""
+    import heapq
+    free_at = list(running_seconds) + [0.0] * max(0, slots - len(running_seconds))
+    heapq.heapify(free_at)
+    finish = max(running_seconds, default=0.0)
+    for _ in range(queued_count):
+        end = heapq.heappop(free_at) + queued_seconds_each
+        heapq.heappush(free_at, end)
+        finish = max(finish, end)
+    return finish
+
+
+def format_duration(seconds):
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} min {secs:02d} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min"
+
+
 def summarize_coefficient_history(coefficient_path, avg_fraction=0.2, min_avg_rows=5):
     """
     Read an OpenFOAM forceCoeffs time history (coefficient.dat) and average

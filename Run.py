@@ -4,6 +4,7 @@ import json
 import subprocess
 import shutil
 import threading
+import time
 import concurrent.futures
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -37,19 +38,46 @@ DEFAULT_NUT_NUTILDA = 5 * 1e-5
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-FONT_TITLE = ("Segoe UI", 22, "bold")
-FONT_SUBTITLE = ("Segoe UI", 13)
-FONT_SECTION = ("Segoe UI", 15, "bold")
-FONT_LABEL = ("Segoe UI", 13)
-FONT_BUTTON = ("Segoe UI", 14, "bold")
-FONT_HINT = ("Segoe UI", 11)
+# Design tokens (warm neutral + amber accent), from the "Focus" redesign handoff.
+BG = "#201f1d"          # window
+CARD = "#2a2725"        # cards / panels
+SUNKEN = "#1a1917"      # inputs, charts, footer bars
+QUEUE_BG = "#232120"
+TRACK = "#35322f"       # bar tracks and thin borders
+BORDER_STRONG = "#4a4642"
+INK = "#f8f4f4"
+INK2 = "#d7d3d3"
+INK3 = "#bab6b6"
+MUTED = "#9b9797"       # never go darker than this for text on the grounds above
+ACCENT = "#e7a86f"
+ACCENT_HOVER = "#ffc896"
+ACCENT_PRESSED = "#c8894c"
+ALERT = "#e0724f"
+ALERT_TEXT = "#f1c3b1"
+ALERT_TINT = "#3b2b24"      # rgba(224,114,79,.14) flattened on BG (CTk has no alpha)
+ALERT_BORDER = "#764434"    # rgba(224,114,79,.45) flattened on BG
+ROW_HOVER = "#2f2c29"
 
-MUTED_TEXT = ("gray40", "gray60")
-RUN_COLOR = "#2fa572"
-RUN_HOVER = "#227a55"
-WARN_COLOR = "#e0a030"
-BACK_COLOR = "#3a3a3a"
-BACK_HOVER = "#4a4a4a"
+FONT_FAMILY = "Segoe UI"
+FONT_MONO = "Consolas"
+FONT_TITLE = (FONT_FAMILY, 22, "bold")
+FONT_SUBTITLE = (FONT_FAMILY, 13)
+FONT_SECTION = (FONT_FAMILY, 15, "bold")
+FONT_LABEL = (FONT_FAMILY, 13)
+FONT_BUTTON = (FONT_FAMILY, 13, "bold")
+FONT_HINT = (FONT_FAMILY, 11)
+FONT_CAPS = (FONT_FAMILY, 10, "bold")
+FONT_HERO = (FONT_FAMILY, 30, "bold")
+
+# Kept under the old names: the rest of the file (and presets/tests) use these.
+MUTED_TEXT = MUTED
+RUN_COLOR = ACCENT
+RUN_HOVER = ACCENT_HOVER
+WARN_COLOR = ALERT
+BACK_COLOR = TRACK
+BACK_HOVER = BORDER_STRONG
+
+WIZARD_STEPS = ["Setup", "Mesh", "Preview", "Type", "Flow", "Run", "Results"]
 
 # What each mesh-quality metric means and which direction is better, shown as
 # a hover tooltip next to its value -- otherwise the raw numbers (e.g. "Max
@@ -133,11 +161,13 @@ class App:
         self._env_banner = None
 
         self.master.title("Aerodynamic Simulation Automation Program")
-        self.master.geometry("920x720")
-        self.master.minsize(780, 560)
+        self.master.geometry("1000x780")
+        self.master.minsize(880, 620)
+        self.master.configure(fg_color=BG)
+        self._traces = []  # (StringVar, trace id) pairs to drop when the screen changes
 
         # Todas as telas são construídas dentro deste container
-        self.container = ctk.CTkFrame(self.master, fg_color="transparent")
+        self.container = ctk.CTkFrame(self.master, fg_color=BG, corner_radius=0)
         self.container.pack(fill="both", expand=True)
 
         self.main_menu()
@@ -179,159 +209,380 @@ class App:
         status = self.env_status
         if not status["checked"]:
             ctk.CTkLabel(frame, text="Checking WSL/OpenFOAM installation...",
-                         font=FONT_HINT, text_color=MUTED_TEXT).pack(anchor="w")
+                         font=FONT_HINT, text_color=MUTED).pack(anchor="w")
             return
         if status["wsl_ok"] and status["openfoam_ok"]:
-            ctk.CTkLabel(frame, text="✓ WSL + OpenFOAM detected", font=FONT_HINT,
-                         text_color=RUN_COLOR).pack(anchor="w")
+            banner = ctk.CTkFrame(frame, fg_color=QUEUE_BG, corner_radius=9,
+                                  border_width=1, border_color=TRACK)
+            banner.pack(fill="x")
+            ctk.CTkLabel(banner, text="✓  WSL + OpenFOAM detected", font=FONT_HINT,
+                         text_color=INK2).pack(anchor="w", padx=14, pady=8)
         else:
-            ctk.CTkLabel(frame, wraplength=800, justify="left", font=FONT_HINT, text_color=WARN_COLOR,
-                         text=f"⚠ {status['detail'] or 'WSL/OpenFOAM not detected.'} "
-                              "See README.md for setup steps -- simulations will fail without it.") \
-                .pack(anchor="w")
+            banner = ctk.CTkFrame(frame, fg_color=ALERT_TINT, corner_radius=9,
+                                  border_width=1, border_color=ALERT_BORDER)
+            banner.pack(fill="x")
+            ctk.CTkLabel(banner, wraplength=780, justify="left", font=FONT_HINT, text_color=ALERT_TEXT,
+                         text=f"▲  {status['detail'] or 'WSL/OpenFOAM not detected.'} "
+                              "See README.md for setup steps — simulations will fail without it.") \
+                .pack(anchor="w", padx=14, pady=8)
 
     # ------------------------------------------------------------------ #
     # Helpers de UI
     # ------------------------------------------------------------------ #
     def clear_frame(self):
+        for var, trace_id in self._traces:
+            try:
+                var.trace_remove("write", trace_id)
+            except Exception:
+                pass
+        self._traces = []
         for widget in self.container.winfo_children():
             widget.destroy()
 
-    def _header(self, parent, title, subtitle=None):
+    def _watch(self, var, callback):
+        """Call `callback` whenever `var` changes, for as long as this screen is shown."""
+        trace_id = var.trace_add("write", lambda *_: callback())
+        self._traces.append((var, trace_id))
+
+    def _header(self, parent, title, subtitle=None, step=None):
         header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.pack(fill="x", padx=30, pady=(24, 10))
-        ctk.CTkLabel(header, text=title, font=FONT_TITLE, anchor="w").pack(fill="x")
+        header.pack(fill="x", padx=26, pady=(22, 12))
+        titles = ctk.CTkFrame(header, fg_color="transparent")
+        titles.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(titles, text=title, font=FONT_TITLE, text_color=INK, anchor="w").pack(fill="x")
         if subtitle:
-            ctk.CTkLabel(header, text=subtitle, font=FONT_SUBTITLE, anchor="w",
-                         text_color=MUTED_TEXT, justify="left").pack(fill="x", pady=(4, 0))
+            ctk.CTkLabel(titles, text=subtitle, font=FONT_LABEL, anchor="w", text_color=MUTED,
+                         justify="left").pack(fill="x", pady=(3, 0))
+        if step is not None:
+            self._step_indicator(header, step).pack(side="right", anchor="n", pady=(6, 0))
         return header
 
+    def _step_indicator(self, parent, current):
+        strip = ctk.CTkFrame(parent, fg_color="transparent")
+        for idx, name in enumerate(WIZARD_STEPS):
+            color = ACCENT if idx == current else (MUTED if idx < current else BORDER_STRONG)
+            dot = ctk.CTkFrame(strip, width=9, height=9, corner_radius=5, fg_color=color)
+            dot.pack(side="left", padx=(0 if idx == 0 else 5, 0))
+            if idx == current:
+                ctk.CTkLabel(strip, text=name, font=FONT_HINT, text_color=ACCENT) \
+                    .pack(side="left", padx=(5, 0))
+        return strip
+
     def _card(self, parent, **pack_kwargs):
-        card = ctk.CTkFrame(parent, corner_radius=12)
-        defaults = dict(fill="x", expand=False, padx=30, pady=10)
+        card = ctk.CTkFrame(parent, corner_radius=11, fg_color=CARD)
+        defaults = dict(fill="x", expand=False, padx=26, pady=8)
         defaults.update(pack_kwargs)
         card.pack(**defaults)
         return card
 
+    def _caps_label(self, parent, text, **kwargs):
+        opts = dict(font=FONT_CAPS, text_color=MUTED, anchor="w")
+        opts.update(kwargs)
+        return ctk.CTkLabel(parent, text=text.upper(), **opts)
+
+    def _entry(self, parent, variable, mono=True, **kwargs):
+        opts = dict(textvariable=variable, height=34, corner_radius=7, fg_color=SUNKEN,
+                    border_color=TRACK, border_width=1, text_color=INK,
+                    font=(FONT_MONO, 13) if mono else FONT_LABEL)
+        opts.update(kwargs)
+        return ctk.CTkEntry(parent, **opts)
+
     def _labeled_entry(self, parent, label_text, variable, hint=None):
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        ctk.CTkLabel(wrap, text=label_text, font=FONT_LABEL, anchor="w").pack(fill="x")
-        entry = ctk.CTkEntry(wrap, textvariable=variable, font=FONT_LABEL, height=34)
+        self._caps_label(wrap, label_text).pack(fill="x")
+        entry = self._entry(wrap, variable)
         entry.pack(fill="x", pady=(4, 0))
         if hint:
             ctk.CTkLabel(wrap, text=hint, font=FONT_HINT, anchor="w",
-                         text_color=MUTED_TEXT).pack(fill="x", pady=(2, 0))
+                         text_color=MUTED).pack(fill="x", pady=(2, 0))
         return wrap, entry
 
     def _primary_button(self, parent, text, command, **kwargs):
-        opts = dict(font=FONT_BUTTON, height=42, corner_radius=8)
+        opts = dict(font=FONT_BUTTON, height=38, corner_radius=8, fg_color=ACCENT,
+                    hover_color=ACCENT_HOVER, text_color=BG)
         opts.update(kwargs)
         return ctk.CTkButton(parent, text=text, command=command, **opts)
 
     def _secondary_button(self, parent, text, command, **kwargs):
-        opts = dict(font=FONT_BUTTON, height=42, corner_radius=8,
-                    fg_color=BACK_COLOR, hover_color=BACK_HOVER)
+        # "Ghost" button: 1px outline, no fill.
+        opts = dict(font=FONT_BUTTON, height=34, corner_radius=7, fg_color="transparent",
+                    hover_color=TRACK, border_width=1, border_color=BORDER_STRONG,
+                    text_color=INK2)
         opts.update(kwargs)
         return ctk.CTkButton(parent, text=text, command=command, **opts)
 
-    def _add_save_preset_button(self, parent):
-        self._secondary_button(parent, "Save Preset...", self.save_preset, width=180) \
-            .pack(anchor="w", padx=30, pady=(0, 10))
+    def _link_button(self, parent, text, command, **kwargs):
+        opts = dict(font=(FONT_FAMILY, 12), height=30, corner_radius=7, fg_color="transparent",
+                    hover_color=TRACK, text_color=INK3, width=80)
+        opts.update(kwargs)
+        return ctk.CTkButton(parent, text=text, command=command, **opts)
 
-    def _add_parallel_toggle(self, parent):
+    def _chip(self, parent, text, fg=TRACK, text_color=INK2):
+        return ctk.CTkLabel(parent, text=text, font=(FONT_FAMILY, 10, "bold"), fg_color=fg,
+                            text_color=text_color, corner_radius=4, height=20)
+
+    def _segmented(self, parent, values, command=None, **kwargs):
+        opts = dict(values=values, command=command, font=FONT_LABEL, fg_color=SUNKEN,
+                    selected_color=BORDER_STRONG, selected_hover_color=BORDER_STRONG,
+                    unselected_color=SUNKEN, unselected_hover_color=TRACK,
+                    text_color=INK, corner_radius=8)
+        opts.update(kwargs)
+        return ctk.CTkSegmentedButton(parent, **opts)
+
+    def _switch(self, parent, text, **kwargs):
+        opts = dict(text=text, font=FONT_LABEL, text_color=INK2, progress_color=ACCENT,
+                    button_color=INK, button_hover_color=INK2, fg_color=BORDER_STRONG)
+        opts.update(kwargs)
+        return ctk.CTkSwitch(parent, **opts)
+
+    def _add_save_preset_button(self, parent):
+        self._secondary_button(parent, "Save Preset...", self.save_preset, width=150) \
+            .pack(anchor="w", padx=26, pady=(0, 10))
+
+    def _add_parallel_toggle(self, parent, padx=26):
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        wrap.pack(fill="x", padx=30, pady=(4, 10))
-        ctk.CTkSwitch(wrap, text="Run angles in parallel", font=FONT_LABEL,
-                      variable=self.parallel_var, onvalue=True, offvalue=False).pack(anchor="w")
-        ctk.CTkLabel(wrap, font=FONT_HINT, text_color=MUTED_TEXT, anchor="w", justify="left",
-                     text="Faster with multiple angles, but each angle already runs its own 2-process\n"
-                          "OpenFOAM solve, so running several at once uses much more CPU/RAM. Leave\n"
-                          "this off on a modest machine.") \
-            .pack(anchor="w", pady=(2, 0))
+        wrap.pack(fill="x", padx=padx, pady=(4, 10))
+        self._switch(wrap, "Run angles in parallel", variable=self.parallel_var,
+                     onvalue=True, offvalue=False).pack(anchor="w")
+        ctk.CTkLabel(wrap, font=FONT_HINT, text_color=MUTED, anchor="w", justify="left",
+                     text="Faster with several angles, but each angle already runs its own 2-process\n"
+                          "OpenFOAM solve, so this uses much more CPU/RAM. Leave it off on a modest machine.") \
+            .pack(anchor="w", pady=(4, 0))
         return wrap
 
     def _nav_bar(self, parent, back_command, next_text, next_command,
-                 next_color=None, next_hover=None):
-        bar = ctk.CTkFrame(parent, fg_color="transparent")
-        bar.pack(fill="x", padx=30, pady=20, side="bottom")
-        self._secondary_button(bar, "← Back", back_command, width=140).pack(side="left")
-        kwargs = {}
-        if next_color:
-            kwargs["fg_color"] = next_color
-        if next_hover:
-            kwargs["hover_color"] = next_hover
-        self._primary_button(bar, next_text, next_command, width=200, **kwargs).pack(side="right")
+                 next_color=None, next_hover=None, extra=None):
+        """Footer action bar: back link left; ghost extras + the primary action right."""
+        bar = ctk.CTkFrame(parent, fg_color=SUNKEN, corner_radius=0)
+        bar.pack(fill="x", side="bottom")
+        ctk.CTkFrame(bar, height=1, fg_color=TRACK, corner_radius=0).pack(fill="x", side="top")
+        inner = ctk.CTkFrame(bar, fg_color="transparent")
+        inner.pack(fill="x", padx=26, pady=12)
+        if back_command:
+            self._link_button(inner, "← Back", back_command).pack(side="left")
+        if next_command:
+            self._primary_button(inner, next_text, next_command, width=190).pack(side="right")
+        for text, command in reversed(extra or []):
+            self._secondary_button(inner, text, command).pack(side="right", padx=(0, 10))
         return bar
+
+    def _choice_card(self, parent, selected):
+        """A card whose border lights up when `selected` is true."""
+        return ctk.CTkFrame(parent, corner_radius=11, fg_color=CARD, border_width=1,
+                            border_color=ACCENT if selected else TRACK)
+
+    def _bind_click(self, widget, command):
+        widget.bind("<Button-1>", lambda _e: command())
+        for child in widget.winfo_children():
+            if not isinstance(child, (ctk.CTkButton, ctk.CTkEntry, ctk.CTkSegmentedButton)):
+                self._bind_click(child, command)
 
     # ------------------------------------------------------------------ #
     # Tela principal
     # ------------------------------------------------------------------ #
     def main_menu(self):
         self.clear_frame()
-        self._header(self.container, "Aerodynamic Simulation Automation Program",
-                     "Define the airfoil geometry and the angles of attack to study.")
-
-        self._env_banner = ctk.CTkFrame(self.container, fg_color="transparent")
-        self._env_banner.pack(fill="x", padx=30, pady=(0, 6))
-        self._populate_env_banner(self._env_banner)
-
-        shortcuts_row = ctk.CTkFrame(self.container, fg_color="transparent")
-        shortcuts_row.pack(fill="x", padx=30, pady=(0, 10))
-        self._secondary_button(shortcuts_row, "Load Preset...", self.load_preset, width=160) \
-            .pack(side="left")
+        extra = [("Load Preset...", self.load_preset)]
         plots_dir = os.path.join(APP_DIR, "plots")
         if os.path.isdir(plots_dir) and any(f.lower().endswith(".png") for f in os.listdir(plots_dir)):
-            self._secondary_button(shortcuts_row, "View Last Results", self.results_viewer_screen, width=200) \
-                .pack(side="right")
+            extra.append(("View Last Results", self.results_viewer_screen))
+        self._nav_bar(self.container, None, "Continue →", self._continue_from_setup, extra=extra)
 
-        card = self._card(self.container)
+        self._header(self.container, "Aerodynamic Simulation Automation Program",
+                     "Define the airfoil geometry and the angles of attack to study.", step=0)
 
-        ctk.CTkLabel(card, text="Airfoil coordinates file", font=FONT_SECTION, anchor="w") \
-            .pack(fill="x", padx=20, pady=(20, 4))
-        file_row = ctk.CTkFrame(card, fg_color="transparent")
-        file_row.pack(fill="x", padx=20)
-        ctk.CTkEntry(file_row, textvariable=self.file1_path, font=FONT_LABEL, height=34) \
-            .pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(file_row, text="Browse...", width=110, height=34,
-                      command=self.browse_file1).pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(card, text="Optional: pick a custom .dat file with airfoil x/y coordinates.",
-                     font=FONT_HINT, anchor="w", text_color=MUTED_TEXT) \
-            .pack(fill="x", padx=20, pady=(4, 16))
+        self._env_banner = ctk.CTkFrame(self.container, fg_color="transparent")
+        self._env_banner.pack(fill="x", padx=26, pady=(0, 10))
+        self._populate_env_banner(self._env_banner)
 
-        naca_wrap, self.naca_entry = self._labeled_entry(
-            card, "NACA 4-digit profile (used if no file is selected)", self.naca_var,
-            hint="e.g. 0012")
-        naca_wrap.pack(fill="x", padx=20, pady=(0, 16))
+        body = ctk.CTkFrame(self.container, fg_color="transparent")
+        body.pack(fill="x", padx=26, pady=(0, 6))
+        body.grid_columnconfigure(0, weight=3, uniform="setup")
+        body.grid_columnconfigure(1, weight=2, uniform="setup")
 
-        angle_wrap, self.angle_entry = self._labeled_entry(
-            card, "Angle(s) of attack", self.angle_var,
-            hint="Comma-separated, in degrees — e.g. 0, 2.5, 5, 10")
-        angle_wrap.pack(fill="x", padx=20, pady=(0, 20))
+        # ---- airfoil card ------------------------------------------------
+        card = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+        self._caps_label(card, "Airfoil").pack(fill="x", padx=18, pady=(16, 6))
+        mode_names = ["NACA 4-digit", "Custom .dat file"]
+        self._airfoil_seg = self._segmented(card, mode_names, command=self._set_airfoil_mode)
+        self._airfoil_seg.pack(anchor="w", padx=18)
+        self._airfoil_seg.set(mode_names[1] if self.airfoil == "airfoil_custom" else mode_names[0])
 
-        ctk.CTkLabel(self.container, text="Mesh generation", font=FONT_SECTION, anchor="w") \
-            .pack(fill="x", padx=30, pady=(10, 8))
+        self._airfoil_inputs = ctk.CTkFrame(card, fg_color="transparent")
+        self._airfoil_inputs.pack(fill="x", padx=18, pady=(12, 0))
+        self._naca_box = ctk.CTkFrame(self._airfoil_inputs, fg_color="transparent")
+        self.naca_entry = self._entry(self._naca_box, self.naca_var, height=40,
+                                      font=(FONT_MONO, 16), placeholder_text="0012")
+        self.naca_entry.pack(fill="x")
+        ctk.CTkLabel(self._naca_box, text="Four digits, e.g. 0012 (symmetric) or 2412 (cambered).",
+                     font=FONT_HINT, text_color=MUTED, anchor="w").pack(fill="x", pady=(3, 0))
+        self._file_box = ctk.CTkFrame(self._airfoil_inputs, fg_color="transparent")
+        file_row = ctk.CTkFrame(self._file_box, fg_color="transparent")
+        file_row.pack(fill="x")
+        self._entry(file_row, self.file1_path, mono=False, height=40).pack(side="left", fill="x", expand=True)
+        self._secondary_button(file_row, "Browse...", self.browse_file1, width=100, height=40) \
+            .pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(self._file_box, text="A .dat file with the airfoil's x/y coordinates.",
+                     font=FONT_HINT, text_color=MUTED, anchor="w").pack(fill="x", pady=(3, 0))
 
-        mesh_row = ctk.CTkFrame(self.container, fg_color="transparent")
-        mesh_row.pack(fill="x", padx=30, pady=(0, 30))
-        mesh_row.grid_columnconfigure((0, 1), weight=1)
+        self._caps_label(card, "Angle(s) of attack").pack(fill="x", padx=18, pady=(16, 4))
+        self.angle_entry = self._entry(card, self.angle_var, height=38, font=(FONT_MONO, 14),
+                                       placeholder_text="0, 2.5, 5, 10")
+        self.angle_entry.pack(fill="x", padx=18)
+        self._chips_row = ctk.CTkFrame(card, fg_color="transparent")
+        self._chips_row.pack(fill="x", padx=18, pady=(8, 16))
 
-        std_card = ctk.CTkFrame(mesh_row, corner_radius=12)
-        std_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        ctk.CTkLabel(std_card, text="Standard Mesh", font=FONT_SECTION).pack(pady=(16, 4))
-        ctk.CTkLabel(std_card, justify="center", text_color=MUTED_TEXT, font=FONT_HINT,
-                     text="Pre-tuned mesh, validated for the\nNACA 0012 profile. Fastest way to start.") \
-            .pack(padx=16)
-        self._primary_button(std_card, "Use Standard Mesh", self.select_standard_mesh) \
-            .pack(pady=16, padx=16, fill="x")
+        # ---- profile preview card ---------------------------------------
+        side = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
+        side.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
+        self._caps_label(side, "Profile preview").pack(fill="x", padx=18, pady=(16, 6))
+        self._profile_canvas = tk.Canvas(side, height=150, bg=SUNKEN, highlightthickness=0)
+        self._profile_canvas.pack(fill="both", expand=True, padx=18)
+        self._profile_canvas.bind("<Configure>", lambda _e: self._draw_profile())
+        stats = ctk.CTkFrame(side, fg_color="transparent")
+        stats.pack(fill="x", padx=18, pady=(10, 16))
+        stats.grid_columnconfigure((0, 1), weight=1)
+        self._cases_stat = ctk.CTkLabel(stats, text="0", font=(FONT_FAMILY, 20, "bold"),
+                                        text_color=ACCENT, anchor="w")
+        self._caps_label(stats, "Cases").grid(row=0, column=0, sticky="w")
+        self._cases_stat.grid(row=1, column=0, sticky="w")
+        self._caps_label(stats, "Solver").grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(stats, text="simpleFoam", font=(FONT_FAMILY, 16, "bold"), text_color=INK2,
+                     anchor="w").grid(row=1, column=1, sticky="w")
 
-        custom_card = ctk.CTkFrame(mesh_row, corner_radius=12)
-        custom_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        ctk.CTkLabel(custom_card, text="Custom Mesh", font=FONT_SECTION).pack(pady=(16, 4))
-        ctk.CTkLabel(custom_card, justify="center", text_color=MUTED_TEXT, font=FONT_HINT,
-                     text="Fine-tune every mesh parameter yourself.\nRecommended for advanced/compressible cases.") \
-            .pack(padx=16)
-        self._primary_button(custom_card, "Use Custom Mesh", self.select_custom_mesh) \
-            .pack(pady=16, padx=16, fill="x")
+        # ---- mesh type cards --------------------------------------------
+        self._caps_label(self.container, "Mesh generation").pack(fill="x", padx=26, pady=(14, 6))
+        self._mesh_pick = "custom" if self.mesh_choice == "custom_mesh" else "standard"
+        self._mesh_cards_row = ctk.CTkFrame(self.container, fg_color="transparent")
+        self._mesh_cards_row.pack(fill="x", padx=26, pady=(0, 10))
+        self._mesh_cards_row.grid_columnconfigure((0, 1), weight=1, uniform="mesh")
+        self._render_mesh_cards()
+
+        self._watch(self.naca_var, self._on_setup_changed)
+        self._watch(self.angle_var, self._on_setup_changed)
+        self._watch(self.file1_path, self._on_setup_changed)
+        self._set_airfoil_mode(self._airfoil_seg.get())
+        self._on_setup_changed()
+
+    def _render_mesh_cards(self):
+        for w in self._mesh_cards_row.winfo_children():
+            w.destroy()
+        options = [
+            ("standard", "Standard Mesh", "VALIDATED",
+             "Pre-tuned mesh, validated against NACA 0012 wind-tunnel data. Sized automatically "
+             "for the Reynolds number. Fastest way to start."),
+            ("custom", "Custom Mesh", "17 PARAMETERS",
+             "Fine-tune every mesh parameter yourself. Recommended for advanced or compressible cases."),
+        ]
+        for col, (key, title, tag, desc) in enumerate(options):
+            card = self._choice_card(self._mesh_cards_row, self._mesh_pick == key)
+            card.grid(row=0, column=col, sticky="nsew", padx=(0, 9) if col == 0 else (9, 0))
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=16, pady=(14, 4))
+            ctk.CTkLabel(top, text=title, font=FONT_SECTION, text_color=INK).pack(side="left")
+            self._chip(top, tag, fg=ACCENT if key == "standard" else TRACK,
+                       text_color=BG if key == "standard" else INK2).pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(card, text=desc, font=FONT_HINT, text_color=INK3, justify="left",
+                         anchor="w", wraplength=380).pack(fill="x", padx=16, pady=(0, 14))
+            self._bind_click(card, lambda k=key: self._pick_mesh(k))
+
+    def _pick_mesh(self, key):
+        self._mesh_pick = key
+        self._render_mesh_cards()
+
+    def _continue_from_setup(self):
+        if self._mesh_pick == "custom":
+            self.select_custom_mesh()
+        else:
+            self.select_standard_mesh()
+
+    def _set_airfoil_mode(self, value):
+        custom = value.startswith("Custom")
+        self.airfoil = "airfoil_custom" if custom else "airfoil_NACA"
+        self._naca_box.pack_forget()
+        self._file_box.pack_forget()
+        (self._file_box if custom else self._naca_box).pack(fill="x")
+        self._draw_profile()
+
+    def _on_setup_changed(self):
+        if not hasattr(self, "_chips_row") or not self._chips_row.winfo_exists():
+            return
+        angles = []
+        for part in self.angle_var.get().split(","):
+            try:
+                angles.append(float(part.strip()))
+            except ValueError:
+                pass
+        for w in self._chips_row.winfo_children():
+            w.destroy()
+        for angle in angles[:12]:
+            self._chip(self._chips_row, f"{angle:g}°", fg=TRACK, text_color=INK2) \
+                .pack(side="left", padx=(0, 5))
+        if len(angles) > 12:
+            ctk.CTkLabel(self._chips_row, text=f"+{len(angles) - 12}", font=FONT_HINT,
+                         text_color=MUTED).pack(side="left")
+        n = len(angles)
+        note = f"{n} case{'s' if n != 1 else ''}"
+        last = getattr(self, "_last_case_seconds", None)
+        if n and last:
+            note += f"  ·  ≈ {functions.format_duration(last * n)} sequentially (from the last run)"
+        ctk.CTkLabel(self._chips_row, text=("   " if n else "") + note, font=FONT_HINT,
+                     text_color=MUTED).pack(side="left")
+        self._cases_stat.configure(text=str(n))
+        self._draw_profile()
+
+    def _profile_points(self):
+        """Closed contour (x, y) of the selected airfoil, or None if it can't be drawn."""
+        try:
+            if self.airfoil == "airfoil_custom":
+                pts = []
+                with open(self.file1_path.get(), "r") as fh:
+                    for line in fh:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                pts.append((float(parts[0]), float(parts[1])))
+                            except ValueError:
+                                pass
+                return pts or None
+            code = self.naca_var.get()
+            if len(code) != 4 or not code.isdigit():
+                return None
+            xu, yu, xl, yl = functions.naca4digit(int(code[0]) / 100, int(code[1]) / 10,
+                                                   int(code[2:]) / 100, 1.0, 80)
+            # naca4digit returns each surface mirrored around the leading edge
+            # (2n-1 points); like search_airfoil, keep only the first n of each:
+            # upper TE->LE, then lower LE->TE.
+            n = 80
+            return list(zip(xu[:n], yu[:n])) + list(zip(xl[:n], yl[:n]))[::-1]
+        except Exception:
+            return None
+
+    def _draw_profile(self):
+        canvas = getattr(self, "_profile_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        w, h = canvas.winfo_width(), canvas.winfo_height()
+        if w < 40 or h < 40:
+            return
+        pts = self._profile_points()
+        if not pts:
+            canvas.create_text(w / 2, h / 2, text="Enter a 4-digit NACA code\nor pick a .dat file",
+                               fill=MUTED, font=FONT_HINT, justify="center")
+            return
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        x0, x1 = min(xs), max(xs)
+        span = max(x1 - x0, 1e-9)
+        pad = 18
+        scale = (w - 2 * pad) / span
+        cy = h / 2 - (max(ys) + min(ys)) / 2 * scale
+        cy = min(max(cy, pad), h - pad)
+        to_canvas = lambda p: (pad + (p[0] - x0) * scale, cy - p[1] * scale)
+        canvas.create_line(pad, cy, w - pad, cy, fill=BORDER_STRONG, dash=(3, 3))
+        flat = [c for p in pts for c in to_canvas(p)]
+        canvas.create_polygon(flat, fill=CARD, outline=ACCENT, width=1.5)
 
     def browse_file1(self):
         path = filedialog.askopenfilename()
@@ -359,9 +610,11 @@ class App:
         if not self.search_airfoil():
             return
         self.clear_frame()
+        self._nav_bar(self.container, self.main_menu, "Create Mesh →", self.mesh_preview_screen,
+                      extra=[("Save Preset...", self.save_preset)])
 
         self._header(self.container, "Custom Mesh Parameters",
-                     "Adjust the block-mesh generation settings, then create the mesh.")
+                     "Adjust the block-mesh generation settings, then create the mesh.", step=1)
 
         self.entries = {}  # Garantindo que self.entries é um dicionário vazio antes de começar
 
@@ -418,84 +671,80 @@ class App:
         ]
 
         scroll = ctk.CTkScrollableFrame(self.container, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        scroll.grid_columnconfigure((0, 1, 2), weight=1, uniform="meshcol")
 
-        for title, fields in groups:
-            card = ctk.CTkFrame(scroll, corner_radius=12)
-            card.pack(fill="x", padx=10, pady=8)
-            ctk.CTkLabel(card, text=title, font=FONT_SECTION, anchor="w") \
-                .pack(fill="x", padx=16, pady=(14, 6))
-            grid = ctk.CTkFrame(card, fg_color="transparent")
-            grid.pack(fill="x", padx=16, pady=(0, 16))
-            grid.grid_columnconfigure((0, 1), weight=1)
-            for idx, (label, var) in enumerate(fields):
-                wrap, entry = self._labeled_entry(grid, label, var)
-                wrap.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=6, pady=6)
+        for idx, (title, fields) in enumerate(groups):
+            card = ctk.CTkFrame(scroll, corner_radius=11, fg_color=CARD)
+            card.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=6, pady=6)
+            self._caps_label(card, title, text_color=ACCENT).pack(fill="x", padx=14, pady=(12, 2))
+            for label, var in fields:
+                wrap, entry = self._labeled_entry(card, label, var)
+                wrap.pack(fill="x", padx=14, pady=(6, 4))
                 self.entries[label] = entry  # Armazenando referências das entradas no dicionário
+            ctk.CTkFrame(card, height=8, fg_color="transparent").pack()
 
-        self._nav_bar(self.container, self.main_menu, "Create Mesh →", self.mesh_preview_screen)
+        info = ctk.CTkFrame(scroll, corner_radius=9, fg_color=QUEUE_BG, border_width=1, border_color=TRACK)
+        info.grid(row=(len(groups) + 2) // 3, column=0, columnspan=3, sticky="ew", padx=6, pady=(6, 10))
+        ctk.CTkLabel(info, font=FONT_HINT, text_color=INK3, justify="left", anchor="w", wraplength=820,
+                     text="ⓘ  The outlet corner is realigned automatically for each angle of attack you run.")             .pack(fill="x", padx=14, pady=10)
 
     # ------------------------------------------------------------------ #
     # Tipo de simulação
     # ------------------------------------------------------------------ #
     def choose_simulation_type(self):
         self.clear_frame()
+        self._nav_bar(self.container, self.main_menu, None, None)
         self._header(self.container, "Choose the Simulation Type",
-                     "Pick the flow regime that matches your case.")
+                     "Pick the flow regime that matches your case.", step=3)
 
         row = ctk.CTkFrame(self.container, fg_color="transparent")
-        row.pack(fill="both", expand=True, padx=30, pady=10)
-        row.grid_columnconfigure((0, 1), weight=1)
+        row.pack(fill="x", padx=26, pady=10)
+        row.grid_columnconfigure((0, 1), weight=1, uniform="type")
 
-        incomp_card = ctk.CTkFrame(row, corner_radius=12)
-        incomp_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        ctk.CTkLabel(incomp_card, text="Incompressible", font=FONT_SECTION).pack(pady=(20, 6))
-        ctk.CTkLabel(incomp_card, justify="center", font=FONT_HINT, text_color=MUTED_TEXT,
-                     text="For flows where density changes are negligible —\n"
-                          "typical in most low-speed aerodynamics cases.") \
-            .pack(padx=16)
-        self._primary_button(incomp_card, "Select Incompressible",
-                             self.Incompressive_flow_variables_page).pack(pady=20, padx=16, fill="x")
-
-        comp_card = ctk.CTkFrame(row, corner_radius=12)
-        comp_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        ctk.CTkLabel(comp_card, text="Compressible", font=FONT_SECTION).pack(pady=(20, 6))
-        ctk.CTkLabel(comp_card, justify="center", font=FONT_HINT, text_color=MUTED_TEXT,
-                     text="For flows with significant density variation —\n"
-                          "typical in high-speed / transonic cases.") \
-            .pack(padx=16)
-        self._primary_button(comp_card, "Select Compressible",
-                             self.Compressive_flow_variables_page).pack(pady=20, padx=16, fill="x")
-
-        bar = ctk.CTkFrame(self.container, fg_color="transparent")
-        bar.pack(fill="x", padx=30, pady=(0, 20))
-        self._secondary_button(bar, "← Back", self.main_menu, width=140).pack(side="left")
+        options = [
+            ("Incompressible", "For flows where density changes are negligible — typical in most "
+             "low-speed aerodynamics cases.", ["M < 0.3", "5 inputs"], self.Incompressive_flow_variables_page),
+            ("Compressible", "For flows with significant density variation — typical in high-speed / "
+             "transonic cases.", ["M > 0.3", "8 inputs"], self.Compressive_flow_variables_page),
+        ]
+        for col, (title, desc, tags, command) in enumerate(options):
+            selected = self.simulation_tipo == title
+            card = self._choice_card(row, selected)
+            card.grid(row=0, column=col, sticky="nsew", padx=(0, 9) if col == 0 else (9, 0))
+            ctk.CTkLabel(card, text=title, font=(FONT_FAMILY, 17, "bold"), text_color=INK,
+                         anchor="w").pack(fill="x", padx=20, pady=(18, 4))
+            ctk.CTkLabel(card, text=desc, font=FONT_LABEL, text_color=INK3, justify="left",
+                         anchor="w", wraplength=360).pack(fill="x", padx=20)
+            chips = ctk.CTkFrame(card, fg_color="transparent")
+            chips.pack(fill="x", padx=20, pady=(12, 8))
+            for tag in tags:
+                self._chip(chips, tag).pack(side="left", padx=(0, 6))
+            self._primary_button(card, f"Select {title}", command).pack(fill="x", padx=20, pady=(6, 20))
 
     # ------------------------------------------------------------------ #
     # Pré-visualização da malha (qualidade + wireframe) antes de simular
     # ------------------------------------------------------------------ #
     def mesh_preview_screen(self):
         self.clear_frame()
+        self._nav_bar(self.container, self.mesh_preview_back, "Continue →", self.choose_simulation_type)
         self._header(self.container, "Mesh Preview",
-                     "Review the mesh quality before running the simulation.")
+                     "Review the mesh quality before running the simulation.", step=2)
 
         self._mesh_preview_angle = self.angles[0] if self.angles else 0.0
 
         if len(self.angles) > 1:
             switcher = ctk.CTkFrame(self.container, fg_color="transparent")
-            switcher.pack(fill="x", padx=30, pady=(0, 6))
-            ctk.CTkLabel(switcher, text="Preview angle:", font=FONT_HINT, text_color=MUTED_TEXT) \
-                .pack(side="left", padx=(0, 10))
-            angle_switcher = ctk.CTkSegmentedButton(switcher, values=[f"{a:g}°" for a in self.angles],
-                                                     command=self._on_mesh_preview_angle_change)
+            switcher.pack(fill="x", padx=26, pady=(0, 8))
+            self._caps_label(switcher, "Preview angle").pack(side="left", padx=(0, 10))
+            angle_switcher = self._segmented(switcher, [f"{a:g}°" for a in self.angles],
+                                             command=self._on_mesh_preview_angle_change)
             angle_switcher.pack(side="left")
             angle_switcher.set(f"{self._mesh_preview_angle:g}°")
 
         self._mesh_preview_body = ctk.CTkFrame(self.container, fg_color="transparent")
-        self._mesh_preview_body.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        self._mesh_preview_body.pack(fill="both", expand=True, padx=26, pady=(0, 10))
         self._render_mesh_preview_loading()
-
-        self._nav_bar(self.container, self.mesh_preview_back, "Continue →", self.choose_simulation_type)
 
         threading.Thread(target=self._generate_mesh_preview_worker,
                           args=(self._mesh_preview_angle,), daemon=True).start()
@@ -612,14 +861,14 @@ class App:
         body = ctk.CTkFrame(self._mesh_preview_body, fg_color="transparent")
         body.pack(fill="both", expand=True)
         body.grid_columnconfigure(0, weight=3)
-        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(1, weight=1, minsize=250)
         body.grid_rowconfigure(0, weight=1)
 
-        plot_frame = ctk.CTkFrame(body, corner_radius=12)
+        plot_frame = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
         plot_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         self._render_mesh_plot(plot_frame, polygons, quality)
 
-        info_frame = ctk.CTkFrame(body, corner_radius=12)
+        info_frame = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
         info_frame.grid(row=0, column=1, sticky="nsew")
         self._render_mesh_quality_panel(info_frame, quality)
 
@@ -629,34 +878,41 @@ class App:
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
         fig = Figure(figsize=(5, 4.3), dpi=100)
-        fig.patch.set_facecolor("#2b2b2b")
+        fig.patch.set_facecolor(CARD)
         ax = fig.add_subplot(111)
-        ax.set_facecolor("#1e1e1e")
+        ax.set_facecolor(SUNKEN)
 
         if polygons:
             xs = [p[0] for poly in polygons for p in poly]
             ys = [p[1] for poly in polygons for p in poly]
-            coll = PolyCollection(polygons, facecolors="none", edgecolors="#4da3ff", linewidths=0.4)
+            coll = PolyCollection(polygons, facecolors="none", edgecolors=BORDER_STRONG, linewidths=0.35)
             ax.add_collection(coll)
             ax.set_xlim(max(-0.3, min(xs)), min(1.3, max(xs)))
             ax.set_ylim(max(-0.6, min(ys)), min(0.6, max(ys)))
         else:
-            ax.text(0.5, 0.5, "Mesh preview unavailable", color="white",
+            ax.text(0.5, 0.5, "Mesh preview unavailable", color=INK2,
                     ha="center", va="center", transform=ax.transAxes)
 
         ax.set_aspect("equal")
-        ax.tick_params(colors="white", labelsize=8)
+        ax.tick_params(colors=MUTED, labelsize=8)
         for spine in ax.spines.values():
-            spine.set_color("#555555")
+            spine.set_color(TRACK)
 
         canvas = FigureCanvasTkAgg(fig, master=parent)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=(8, 0))
-
-        toolbar_frame = tk.Frame(parent, bg="#2b2b2b")
-        toolbar_frame.pack(fill="x", padx=8)
-        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        # Matplotlib's own toolbar is a light-grey strip with dark icons; drive
+        # the same actions from buttons that match the rest of the app instead.
+        toolbar = NavigationToolbar2Tk(canvas, parent, pack_toolbar=False)
         toolbar.update()
+        tools = ctk.CTkFrame(parent, fg_color="transparent")
+        tools.pack(fill="x", padx=10, pady=(10, 0))
+        self._secondary_button(tools, "Pan", toolbar.pan, width=60, height=28, font=(FONT_FAMILY, 12)) \
+            .pack(side="left", padx=(0, 6))
+        self._secondary_button(tools, "Zoom", toolbar.zoom, width=60, height=28, font=(FONT_FAMILY, 12)) \
+            .pack(side="left", padx=(0, 6))
+        self._secondary_button(tools, "Reset", toolbar.home, width=60, height=28, font=(FONT_FAMILY, 12)) \
+            .pack(side="left")
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=(6, 0))
 
         if polygons:
             total_cells = quality.get("cells")
@@ -666,8 +922,7 @@ class App:
                 .pack(padx=8, pady=(2, 8))
 
     def _render_mesh_quality_panel(self, parent, quality):
-        ctk.CTkLabel(parent, text="Mesh Quality", font=FONT_SECTION, anchor="w") \
-            .pack(fill="x", padx=16, pady=(16, 8))
+        self._caps_label(parent, "Mesh quality").pack(fill="x", padx=16, pady=(16, 8))
 
         if not quality.get("blockmesh_ok"):
             ctk.CTkLabel(parent, text="✗ Mesh generation failed", font=FONT_LABEL,
@@ -678,10 +933,10 @@ class App:
             return
 
         ok = quality.get("mesh_ok")
-        status_color = RUN_COLOR if ok else WARN_COLOR
-        status_text = "✓ Mesh OK" if ok else "⚠ Mesh has warnings"
-        ctk.CTkLabel(parent, text=status_text, font=FONT_LABEL, text_color=status_color, anchor="w") \
-            .pack(fill="x", padx=16, pady=(0, 12))
+        status_color = ACCENT if ok else ALERT
+        status_text = "✓  Mesh OK" if ok else "▲  Mesh has warnings"
+        ctk.CTkLabel(parent, text=status_text, font=(FONT_FAMILY, 17, "bold"), text_color=status_color,
+                     anchor="w").pack(fill="x", padx=16, pady=(0, 12))
 
         rows = [
             ("Cells", quality.get("cells")),
@@ -705,11 +960,10 @@ class App:
                 help_icon.pack(side="left")
                 _Tooltip(help_icon, help_text)
             display_value = f"{value:.2f}" if isinstance(value, float) else f"{value:,}"
-            ctk.CTkLabel(row, text=display_value, font=FONT_LABEL, anchor="e").pack(side="right")
+            ctk.CTkLabel(row, text=display_value, font=(FONT_MONO, 13), text_color=INK, anchor="e").pack(side="right")
 
         if quality.get("warnings"):
-            ctk.CTkLabel(parent, text="Warnings", font=FONT_SECTION, anchor="w") \
-                .pack(fill="x", padx=16, pady=(16, 4))
+            self._caps_label(parent, "Warnings").pack(fill="x", padx=16, pady=(16, 4))
             for w_text in quality["warnings"][:6]:
                 ctk.CTkLabel(parent, text=w_text, font=FONT_HINT, text_color=WARN_COLOR,
                              wraplength=260, justify="left", anchor="w").pack(fill="x", padx=16, pady=2)
@@ -831,6 +1085,13 @@ class App:
             standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_c)
             standard_expansion_ratio = functions.expansion_ratio_for_flow(flow_speed, nu_value_c)
 
+        self._init_progress_state()
+        self._log_event(f"Preparing {len(self.angles)} case(s): {', '.join(f'{a:g}°' for a in self.angles)}")
+        nu_used = nu_value_I if self.simulation_tipo == "Incompressible" else nu_value_c
+        if self.mesh_choice == "standard_mesh" and nu_used:
+            self._log_event(f"Standard mesh sized for Re ~ {flow_speed / nu_used:,.0f} "
+                            f"(boundary-layer expansion ratio {standard_expansion_ratio:.4f})")
+
         for angle in self.angles:
             angle_directory_path = os.path.join(base_directory, f"Angle_{angle}")
             system_directory_path = os.path.join(angle_directory_path, "system")
@@ -886,141 +1147,638 @@ class App:
                 return
 
             print(f"File '{source_file}' copied and renamed to '{destination_file_path}' after running blockMeshDirect for angle {angle}")
+            self._log_event(f"{angle:g}°: mesh definition and flow conditions written")
 
+        self._log_event("Case files ready — starting OpenFOAM in WSL")
         self.show_progress_screen()
         threading.Thread(target=self._run_simulations_worker, daemon=True).start()
 
     # ------------------------------------------------------------------ #
     # Execução das simulações no WSL (roda em thread separada)
     # ------------------------------------------------------------------ #
-    def show_progress_screen(self):
-        self.clear_frame()
-        self._header(self.container, "Running Simulations",
-                     "This can take a while depending on the mesh size and number of angles.\n"
-                     "Feel free to leave this window open in the background.")
-        card = self._card(self.container)
-        self.progress_status_label = ctk.CTkLabel(card, text="Starting...", font=FONT_LABEL)
-        self.progress_status_label.pack(padx=20, pady=(24, 8))
-        self.progress_bar = ctk.CTkProgressBar(card, width=420)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(padx=20, pady=(0, 24))
+    STAGE_LABELS = {"queued": "Queued", "preparing": "Preparing case", "blockMesh": "Meshing (blockMesh)",
+                    "decomposePar": "Splitting domain (decomposePar)", "simpleFoam": "Solving",
+                    "reconstructPar": "Merging results (reconstructPar)", "done": "Done", "failed": "Failed"}
+    # Seconds without any change before a running angle is flagged as possibly stuck.
+    STALL_SECONDS = {"simpleFoam": 120, "default": 300}
 
-        plot_frame = ctk.CTkFrame(self.container, corner_radius=12)
-        plot_frame.pack(fill="both", expand=True, padx=30, pady=(0, 20))
-        self._build_live_plot(plot_frame)
+    def _init_progress_state(self):
+        self._progress_log_lines = []
+        self._progress_status_override = None
+        self._live_data = {}
+        self._progress_slots = 1
+        self._run_started_at = time.monotonic()
+        self._progress = {}
+        for angle in self.angles:
+            settings = functions.read_case_iteration_settings(
+                os.path.join(APP_DIR, "Simulations", f"Angle_{angle}", "system", "controlDict"))
+            delta_t, max_iter = settings if settings else (None, None)
+            self._progress[angle] = {
+                "stage": "queued", "iter": 0, "max_iter": max_iter, "delta_t": delta_t,
+                "samples": [], "changed_at": time.monotonic(), "started_at": None,
+                "ended_at": None, "coeff_rows": 0, "warned": False}
+
+    def _log_event(self, message):
+        line = f"[{time.strftime('%H:%M:%S')}] {message}"
+        try:
+            print(line)
+        except UnicodeEncodeError:
+            # Windows consoles (cp1252) can't print every symbol; the console
+            # echo must never be able to break the run.
+            print(line.encode("ascii", "replace").decode("ascii"))
+        self.master.after(0, self._append_log, line)
+
+    def _append_log(self, line):
+        self._progress_log_lines.append(line)
+        last = getattr(self, "_log_last", None)
+        if last is not None and last.winfo_exists():
+            last.configure(text=line)
+        box = getattr(self, "_progress_log_box", None)
+        if box is not None and box.winfo_exists():
+            box.configure(state="normal")
+            box.insert("end", line + "\n")
+            box.see("end")
+            box.configure(state="disabled")
+
+    def show_progress_screen(self):
+        if not hasattr(self, "_progress") or set(self._progress) != set(self.angles):
+            self._init_progress_state()
+        self.clear_frame()
+        self._selected_angle = self.angles[0]
+        self._user_selected = False
+        self._chart_dirty = True
+        self._expanded = False
+        n = len(self.angles)
+
+        # ---- log strip (packed first so it always keeps its space) --------
+        self._log_strip = ctk.CTkFrame(self.container, fg_color=SUNKEN, corner_radius=0)
+        self._log_strip.pack(side="bottom", fill="x")
+        ctk.CTkFrame(self._log_strip, height=1, fg_color=TRACK, corner_radius=0).pack(fill="x")
+        strip_row = ctk.CTkFrame(self._log_strip, fg_color="transparent")
+        strip_row.pack(fill="x", padx=26, pady=10)
+        self._caps_label(strip_row, "Log").pack(side="left", padx=(0, 12))
+        self._log_toggle = ctk.CTkButton(strip_row, text="Open full log ▾", width=110, height=24,
+                                         font=FONT_HINT, fg_color="transparent", hover_color=TRACK,
+                                         text_color=ACCENT, command=self._toggle_log_drawer)
+        self._log_toggle.pack(side="right")
+        self._log_last = ctk.CTkLabel(strip_row, text="", font=(FONT_MONO, 12), text_color=INK3, anchor="w")
+        self._log_last.pack(side="left", fill="x", expand=True)
+        self._progress_log_box = ctk.CTkTextbox(self.container, height=120, font=(FONT_MONO, 11),
+                                                fg_color=SUNKEN, text_color=INK3, corner_radius=0)
+        self._progress_log_box.insert("end", "".join(line + "\n" for line in self._progress_log_lines))
+        self._progress_log_box.see("end")
+        self._progress_log_box.configure(state="disabled")
+        self._log_drawer_open = False
+        if self._progress_log_lines:
+            self._log_last.configure(text=self._progress_log_lines[-1])
+
+        # ---- header: title left, the numbers people came for right --------
+        header = ctk.CTkFrame(self.container, fg_color="transparent")
+        header.pack(fill="x", padx=26, pady=(20, 10))
+        titles = ctk.CTkFrame(header, fg_color="transparent")
+        titles.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(titles, text="Running Simulations", font=FONT_TITLE, text_color=INK, anchor="w") \
+            .pack(fill="x")
+        mesh_name = "custom" if self.mesh_choice == "custom_mesh" else "standard"
+        mode = "parallel" if self.parallel_var.get() and n > 1 else "sequential"
+        ctk.CTkLabel(titles, text=f"{n} angle{'s' if n != 1 else ''}  ·  {mesh_name} mesh  ·  simpleFoam  ·  {mode}",
+                     font=FONT_LABEL, text_color=MUTED, anchor="w").pack(fill="x", pady=(3, 0))
+        stats = ctk.CTkFrame(header, fg_color="transparent")
+        stats.pack(side="right")
+        elapsed_box = ctk.CTkFrame(stats, fg_color="transparent")
+        elapsed_box.pack(side="left", padx=(0, 26), anchor="s")
+        self._caps_label(elapsed_box, "Elapsed", anchor="e").pack(anchor="e")
+        self.progress_elapsed_label = ctk.CTkLabel(elapsed_box, text="0 s", font=(FONT_FAMILY, 17),
+                                                   text_color=INK2)
+        self.progress_elapsed_label.pack(anchor="e")
+        remaining_box = ctk.CTkFrame(stats, fg_color="transparent")
+        remaining_box.pack(side="left", anchor="s")
+        self._caps_label(remaining_box, "Remaining", anchor="e").pack(anchor="e")
+        self.progress_eta_label = ctk.CTkLabel(remaining_box, text="estimating…", font=FONT_HERO,
+                                               text_color=ACCENT)
+        self.progress_eta_label.pack(anchor="e")
+
+        # ---- one segment per case ----------------------------------------
+        segments = ctk.CTkFrame(self.container, fg_color="transparent")
+        segments.pack(fill="x", padx=26, pady=(0, 10))
+        segments.grid_columnconfigure(tuple(range(n)), weight=1, uniform="seg")
+        self._progress_segments = {}
+        for col, angle in enumerate(self.angles):
+            cell = ctk.CTkFrame(segments, fg_color="transparent")
+            cell.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 2, 0 if col == n - 1 else 2))
+            bar = ctk.CTkProgressBar(cell, height=6, corner_radius=3, fg_color=TRACK, progress_color=ACCENT)
+            bar.set(0)
+            bar.pack(fill="x")
+            ctk.CTkLabel(cell, text=f"{angle:g}°", font=(FONT_FAMILY, 11), text_color=MUTED, anchor="w") \
+                .pack(fill="x", pady=(3, 0))
+            self._progress_segments[angle] = bar
+        # kept for scripts/tests that read the overall status line
+        self.progress_status_label = ctk.CTkLabel(segments, text="", font=FONT_HINT, text_color=MUTED)
+        self.progress_bar = ctk.CTkProgressBar(segments)
+
+        # ---- body: case list | detail ------------------------------------
+        self._progress_body = ctk.CTkFrame(self.container, fg_color="transparent")
+        self._progress_body.pack(fill="both", expand=True, padx=26, pady=(0, 10))
+        body = self._progress_body
+        body.grid_columnconfigure(0, weight=0, minsize=286)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        self._progress_left = ctk.CTkFrame(body, fg_color="transparent", width=286)
+        self._progress_left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        self._progress_left.grid_propagate(False)
+        self._progress_left.grid_rowconfigure(0, weight=1)
+        self._progress_left.grid_columnconfigure(0, weight=1)
+        rows_holder = ctk.CTkScrollableFrame(self._progress_left, fg_color="transparent")
+        rows_holder.grid(row=0, column=0, sticky="nsew")
+        self._progress_rows = {}
+        for angle in self.angles:
+            self._progress_rows[angle] = self._build_case_row(rows_holder, angle)
+
+        queue = ctk.CTkFrame(self._progress_left, corner_radius=9, fg_color=QUEUE_BG,
+                             border_width=1, border_color=TRACK)
+        queue.grid(row=1, column=0, sticky="sew", pady=(8, 0))
+        qtop = ctk.CTkFrame(queue, fg_color="transparent")
+        qtop.pack(fill="x", padx=13, pady=(12, 6))
+        self._caps_label(qtop, "Queue").pack(side="left")
+        self._queue_slots_label = ctk.CTkLabel(qtop, text="", font=FONT_HINT, text_color=INK3)
+        self._queue_slots_label.pack(side="right")
+        self._queue_slot_row = ctk.CTkFrame(queue, fg_color="transparent")
+        self._queue_slot_row.pack(fill="x", padx=13)
+        self._queue_note = ctk.CTkLabel(queue, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
+        self._queue_note.pack(fill="x", padx=13, pady=(6, 12))
+
+        # ---- detail panel -------------------------------------------------
+        self._progress_detail = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
+        self._progress_detail.grid(row=0, column=1, sticky="nsew")
+        detail = self._progress_detail
+        top = ctk.CTkFrame(detail, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(16, 0))
+        self._detail_top = top
+        titles = ctk.CTkFrame(top, fg_color="transparent")
+        titles.pack(side="left", fill="x", expand=True)
+        self._detail_title = ctk.CTkLabel(titles, text="", font=(FONT_FAMILY, 19, "bold"),
+                                          text_color=INK, anchor="w")
+        self._detail_title.pack(fill="x")
+        self._detail_line = ctk.CTkLabel(titles, text="", font=(FONT_FAMILY, 12), text_color=MUTED, anchor="w")
+        self._detail_line.pack(fill="x", pady=(2, 0))
+        self._expand_btn = self._secondary_button(top, "Expand", self._toggle_expand, width=80, height=28,
+                                                  font=(FONT_FAMILY, 12))
+        self._expand_btn.pack(side="right")
+        self._secondary_button(top, "Case log", self._toggle_log_drawer, width=80, height=28,
+                               font=(FONT_FAMILY, 12)).pack(side="right", padx=(0, 8))
+
+        self._stuck_strip = ctk.CTkFrame(detail, corner_radius=8, fg_color=ALERT_TINT,
+                                         border_width=1, border_color=ALERT_BORDER)
+        self._stuck_label = ctk.CTkLabel(self._stuck_strip, text="", font=(FONT_FAMILY, 12),
+                                         text_color=ALERT_TEXT, anchor="w", justify="left", wraplength=520)
+        self._stuck_label.pack(fill="x", padx=12, pady=8)
+        self._stuck_visible = False
+
+        foot = ctk.CTkFrame(detail, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=20, pady=(6, 16))
+        self._cd_value = ctk.CTkLabel(foot, text="Cd  —", font=(FONT_FAMILY, 20, "bold"), text_color=ACCENT)
+        self._cd_value.pack(side="left")
+        self._cl_value = ctk.CTkLabel(foot, text="Cl  —", font=(FONT_FAMILY, 20, "bold"), text_color=INK)
+        self._cl_value.pack(side="left", padx=(22, 0))
+        self._chart_note = ctk.CTkLabel(foot, text="", font=(FONT_FAMILY, 12), text_color=MUTED, anchor="e")
+        self._chart_note.pack(side="right")
+
+        self._build_live_plot(detail)
+
+        self._progress_token = object()
+        self._select_case(self.angles[0], user=False)
+        self._progress_tick(self._progress_token)
+
+    def _build_case_row(self, parent, angle):
+        row = ctk.CTkFrame(parent, corner_radius=9, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        stripe = ctk.CTkFrame(row, width=3, height=30, corner_radius=2, fg_color=TRACK)
+        stripe.pack(side="left", fill="y", padx=(0, 10), pady=6)
+        angle_label = ctk.CTkLabel(row, text=f"{angle:g}°", width=44, anchor="w",
+                                   font=(FONT_FAMILY, 16, "bold"), text_color=INK)
+        angle_label.pack(side="left")
+        text_box = ctk.CTkFrame(row, fg_color="transparent")
+        text_box.pack(side="left", fill="x", expand=True, padx=(4, 8), pady=9)
+        line = ctk.CTkFrame(text_box, fg_color="transparent")
+        line.pack(fill="x")
+        status = ctk.CTkLabel(line, text="Queued", anchor="w", font=(FONT_FAMILY, 12), text_color=INK2)
+        status.pack(side="left", fill="x", expand=True)
+        chip = self._chip(line, "STUCK", fg=ALERT, text_color=BG)
+        bar = ctk.CTkProgressBar(text_box, height=3, corner_radius=2, fg_color=TRACK, progress_color=ACCENT)
+        bar.set(0)
+        bar.pack(fill="x", pady=(5, 0))
+        widgets = dict(row=row, stripe=stripe, status=status, bar=bar, chip=chip, chip_shown=False)
+
+        def hover(on):
+            if angle != self._selected_angle:
+                row.configure(fg_color=ROW_HOVER if on else "transparent")
+
+        row.bind("<Enter>", lambda _e: hover(True))
+        row.bind("<Leave>", lambda _e: hover(False))
+        self._bind_click(row, lambda a=angle: self._select_case(a, user=True))
+        return widgets
+
+    def _select_case(self, angle, user=True):
+        if user:
+            self._user_selected = True
+        self._selected_angle = angle
+        self._chart_dirty = True
+        for a, widgets in self._progress_rows.items():
+            widgets["row"].configure(fg_color=CARD if a == angle else "transparent")
+        self._refresh_progress_view()
+
+    def _toggle_log_drawer(self):
+        if not self._log_toggle.winfo_exists():
+            return
+        if self._log_drawer_open:
+            self._progress_log_box.pack_forget()
+            self._log_toggle.configure(text="Open full log ▾")
+        else:
+            self._progress_log_box.pack(side="bottom", fill="x", before=self._progress_body)
+            self._progress_log_box.see("end")
+            self._log_toggle.configure(text="Hide log ▴")
+        self._log_drawer_open = not self._log_drawer_open
+
+    def _toggle_expand(self):
+        self._expanded = not self._expanded
+        if self._expanded:
+            self._progress_left.grid_remove()
+            self._progress_detail.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        else:
+            self._progress_detail.grid(row=0, column=1, columnspan=1, sticky="nsew")
+            self._progress_left.grid()
+        self._expand_btn.configure(text="Collapse" if self._expanded else "Expand")
+
+    def _progress_view_alive(self):
+        label = getattr(self, "progress_eta_label", None)
+        return label is not None and label.winfo_exists() and hasattr(self, "_progress_rows") \
+            and bool(getattr(self, "_progress_token", None))
+
+    def _progress_tick(self, token):
+        if token is not getattr(self, "_progress_token", None) or not self._progress_view_alive():
+            return
+        self._refresh_progress_view()
+        self.master.after(1000, self._progress_tick, token)
+
+    def _set_overall_status(self, text):
+        self._progress_status_override = text
+        if self._progress_view_alive():
+            self._refresh_progress_view()
+            self._detail_line.configure(text=text)
+
+    def _progress_poller(self, stop_event):
+        # One wsl call per cycle covers every angle, so parallel runs cost no
+        # more polling than a sequential one.
+        run_ids = [f"Angle_{angle}" for angle in self.angles]
+        command = functions.build_progress_poll_command(run_ids)
+        while not stop_event.wait(2.5):
+            try:
+                r = subprocess.run(["wsl", "-e", "bash", "-c", command],
+                                    capture_output=True, text=True, timeout=20)
+            except Exception:
+                continue
+            snapshot = functions.parse_progress_snapshot(r.stdout or "")
+            if snapshot:
+                self.master.after(0, self._apply_progress_snapshot, snapshot)
+
+    def _apply_progress_snapshot(self, snapshot):
+        now = time.monotonic()
+        for angle in self.angles:
+            st = self._progress[angle]
+            if st["stage"] in ("done", "failed"):
+                continue
+            info = snapshot.get(f"Angle_{angle}")
+            if info is None:
+                continue
+            stage = functions.stage_from_logs(info["stages"])
+            if stage != st["stage"]:
+                self._progress_stage_changed(angle, st, stage, now)
+            if stage in ("simpleFoam", "reconstructPar") and info["time"] is not None and st["delta_t"]:
+                iteration = int(round(info["time"] / st["delta_t"]))
+                if iteration != st["iter"]:
+                    st["iter"] = iteration
+                    st["changed_at"] = now
+                    st["warned"] = False
+                    st["samples"].append((now, iteration))
+                    del st["samples"][:-60]
+            data = functions.parse_live_coefficients(info["coeff"]) if info["coeff"].strip() else None
+            if data and len(data["time"]) != st["coeff_rows"]:
+                st["coeff_rows"] = len(data["time"])
+                self._update_live_plot(angle, data)
+        self._refresh_progress_view()
+
+    def _progress_stage_changed(self, angle, st, stage, now):
+        st["stage"] = stage
+        st["changed_at"] = now
+        st["warned"] = False
+        if stage == "simpleFoam":
+            limit = f", up to {st['max_iter']} iterations" if st["max_iter"] else ""
+            message = f"solver started (simpleFoam{limit})"
+        else:
+            message = {"preparing": "preparing case files",
+                       "blockMesh": "generating mesh (blockMesh)",
+                       "decomposePar": "splitting domain for the 2-process solve (decomposePar)",
+                       "reconstructPar": "solve finished, merging results (reconstructPar)"}.get(stage, stage)
+        self._log_event(f"{angle:g}°: {message}")
+
+    def _progress_angle_started(self, angle):
+        st = self._progress[angle]
+        now = time.monotonic()
+        st["started_at"] = now
+        st["changed_at"] = now
+        if st["stage"] == "queued":
+            st["stage"] = "preparing"
+        self._log_event(f"{angle:g}°: started")
+        self._refresh_progress_view()
+
+    def _progress_angle_finished(self, angle, success):
+        st = self._progress[angle]
+        now = time.monotonic()
+        st["ended_at"] = now
+        st["stage"] = "done" if success else "failed"
+        took = functions.format_duration(now - st["started_at"]) if st["started_at"] else "?"
+        self._log_event(f"{angle:g}°: {'finished' if success else 'FAILED'} after {took}"
+                        + ("" if success else " — see the console output for details"))
+        self._refresh_progress_view()
+
+    def _refresh_progress_view(self):
+        if not self._progress_view_alive():
+            return
+        now = time.monotonic()
+        total = len(self.angles)
+        finished = running = queued = 0
+        stuck_angles = {}
+        infos = {}
+        for angle in self.angles:
+            st = self._progress[angle]
+            stage = st["stage"]
+            fraction = functions.run_progress_fraction(stage, st["iter"], st["max_iter"])
+            finished += stage in ("done", "failed")
+            queued += stage == "queued"
+            running += stage not in ("done", "failed", "queued")
+
+            stage_name = self.STAGE_LABELS.get(stage, stage)
+            if stage == "simpleFoam":
+                status = f"Solving · {st['iter']}" + (f"/{st['max_iter']}" if st["max_iter"] else "")
+            elif stage == "done":
+                status = "Done" + (f" in {functions.format_duration(st['ended_at'] - st['started_at'])}"
+                                   if st["started_at"] and st["ended_at"] else "")
+            else:
+                status = stage_name if stage in ("queued", "failed") else \
+                    f"{stage_name} · {functions.format_duration(now - st['changed_at'])}"
+
+            stuck_for = None
+            if stage not in ("done", "failed", "queued"):
+                limit = self.STALL_SECONDS.get(stage, self.STALL_SECONDS["default"])
+                idle = now - st["changed_at"]
+                if idle > limit:
+                    stuck_for = idle
+                    stuck_angles[angle] = idle
+                    if not st["warned"]:
+                        st["warned"] = True
+                        self._log_event(f"{angle:g}°: WARNING no progress for {functions.format_duration(idle)} "
+                                        f"in stage '{stage_name}'")
+
+            if stuck_for is not None:
+                color = ALERT
+            elif stage == "done":
+                color = INK2
+            elif stage == "failed":
+                color = ALERT
+            else:
+                color = ACCENT
+            infos[angle] = dict(status=status, stage=stage, stuck_for=stuck_for, fraction=fraction, color=color)
+
+            widgets = self._progress_rows[angle]
+            widgets["status"].configure(text=status, text_color=ALERT_TEXT if stuck_for is not None else INK2)
+            widgets["bar"].configure(progress_color=color)
+            widgets["bar"].set(fraction)
+            widgets["stripe"].configure(fg_color=color if stage != "queued" else TRACK)
+            if stuck_for is not None and not widgets["chip_shown"]:
+                widgets["chip"].pack(side="right", padx=(6, 0))
+                widgets["chip_shown"] = True
+            elif stuck_for is None and widgets["chip_shown"]:
+                widgets["chip"].pack_forget()
+                widgets["chip_shown"] = False
+            seg = self._progress_segments[angle]
+            seg.configure(progress_color=color)
+            seg.set(fraction)
+
+        # Until the user picks a case, follow whichever one is being solved.
+        if not self._user_selected:
+            active = next((a for a in self.angles if self._progress[a]["stage"] == "simpleFoam"), None)
+            if active is not None and active != self._selected_angle:
+                self._selected_angle = active
+                self._chart_dirty = True
+                for a, w in self._progress_rows.items():
+                    w["row"].configure(fg_color=CARD if a == active else "transparent")
+
+        self._refresh_detail_panel(infos, now)
+
+        # ---- header numbers ----------------------------------------------
+        self.progress_elapsed_label.configure(text=functions.format_duration(now - self._run_started_at))
+        if self._progress_status_override is not None:
+            self.progress_eta_label.configure(text="—", font=FONT_HERO)
+        else:
+            eta = self._estimate_overall_eta()
+            if finished == total:
+                self.progress_eta_label.configure(text="—")
+            elif eta is None:
+                self.progress_eta_label.configure(text="estimating…", font=(FONT_FAMILY, 20, "bold"))
+            else:
+                self.progress_eta_label.configure(text=f"≈ {functions.format_duration(eta)}", font=FONT_HERO)
+        overall = f"{finished}/{total} finished  ·  {running} running  ·  {queued} queued"
+        self.progress_status_label.configure(text=self._progress_status_override or overall)
+
+        # ---- queue card --------------------------------------------------
+        slots = max(1, getattr(self, "_progress_slots", 1))
+        used = min(running, slots)
+        self._queue_slots_label.configure(text=f"{used} of {slots} solver slot{'s' if slots != 1 else ''} in use")
+        for w in self._queue_slot_row.winfo_children():
+            w.destroy()
+        for i in range(slots):
+            self._queue_slot_row.grid_columnconfigure(i, weight=1)
+            ctk.CTkFrame(self._queue_slot_row, height=5, corner_radius=3,
+                         fg_color=ACCENT if i < used else TRACK).grid(row=0, column=i, sticky="ew", padx=2)
+        done_times = [s["ended_at"] - s["started_at"] for s in self._progress.values()
+                      if s["stage"] == "done" and s["started_at"] and s["ended_at"]]
+        note = f"{queued} waiting" if queued else "nothing waiting"
+        if done_times:
+            average = sum(done_times) / len(done_times)
+            self._last_case_seconds = average
+            note += f"  ·  avg {functions.format_duration(average)} per case"
+        self._queue_note.configure(text=note)
+
+    def _refresh_detail_panel(self, infos, now):
+        angle = self._selected_angle
+        info = infos.get(angle)
+        st = self._progress.get(angle)
+        if info is None or st is None:
+            return
+        stage = info["stage"]
+        self._detail_title.configure(text=f"{angle:g}°  —  {info['status']}")
+
+        if stage == "simpleFoam":
+            rate = functions.iteration_rate(st["samples"])
+            line = f"Iteration {st['iter']}" + (f" of {st['max_iter']}" if st["max_iter"] else "")
+            if rate and st["max_iter"]:
+                line += f"  ·  ~{functions.format_duration((st['max_iter'] - st['iter']) / rate)} left  ·  {rate:.1f} it/s"
+            else:
+                line += "  ·  estimating time left…"
+        elif stage == "queued":
+            line = "Waiting for a free solver slot."
+        elif stage == "done":
+            line = "Finished — results were copied back."
+        elif stage == "failed":
+            line = "This case did not finish; see the log for details."
+        else:
+            line = f"Stage: {self.STAGE_LABELS.get(stage, stage)}"
+        self._detail_line.configure(text=line)
+
+        if info["stuck_for"] is not None:
+            self._stuck_label.configure(
+                text=f"No progress for {functions.format_duration(info['stuck_for'])} in "
+                     f"“{self.STAGE_LABELS.get(stage, stage)}”. The case may be stuck — check the log, "
+                     "or stop and rerun this angle if it doesn't move.")
+            if not self._stuck_visible:
+                self._stuck_strip.pack(fill="x", padx=20, pady=(10, 0), after=self._detail_top)
+                self._stuck_visible = True
+        elif self._stuck_visible:
+            self._stuck_strip.pack_forget()
+            self._stuck_visible = False
+
+        data = self._live_data.get(angle)
+        if data:
+            self._cd_value.configure(text=f"Cd  {data['cd'][-1]:.4f}")
+            self._cl_value.configure(text=f"Cl  {data['cl'][-1]:.4f}")
+            self._chart_note.configure(text=f"{len(data['time'])} samples")
+        else:
+            self._cd_value.configure(text="Cd  —")
+            self._cl_value.configure(text="Cl  —")
+            self._chart_note.configure(text="")
+        if self._chart_dirty:
+            self._draw_selected_chart()
+
+    def _estimate_overall_eta(self):
+        rates = {angle: functions.iteration_rate(st["samples"])
+                 for angle, st in self._progress.items() if st["stage"] == "simpleFoam"}
+        known = [r for r in rates.values() if r]
+        if not known:
+            return None
+        avg_rate = sum(known) / len(known)
+        running, queued, per_angle = [], 0, []
+        for angle, st in self._progress.items():
+            max_iter = st["max_iter"]
+            if not max_iter or st["stage"] in ("done", "failed"):
+                continue
+            if st["stage"] == "queued":
+                queued += 1
+                per_angle.append(max_iter / avg_rate)
+            elif st["stage"] == "simpleFoam":
+                running.append((max_iter - st["iter"]) / (rates.get(angle) or avg_rate))
+            elif st["stage"] == "reconstructPar":
+                running.append(0.0)
+            else:
+                running.append(max_iter / avg_rate)
+        each = sum(per_angle) / len(per_angle) if per_angle else 0.0
+        return functions.estimate_total_eta(running, queued, each, self._progress_slots)
 
     def _build_live_plot(self, parent):
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-        # Parallel runs get one small subplot per angle (laid out in a grid)
-        # instead of a single plot, since several angles converge at once.
-        self._live_plot_grid_mode = self.parallel_var.get() and len(self.angles) > 1
-        self._live_plot_axes = {}
+        # One chart for the selected case (click another row to switch); every
+        # case keeps its own series in _live_data so switching is instant.
+        self._live_fig = Figure(figsize=(6, 2.6), dpi=100, constrained_layout=True)
+        self._live_fig.patch.set_facecolor(SUNKEN)
+        self._live_plot_canvas = FigureCanvasTkAgg(self._live_fig, master=parent)
+        widget = self._live_plot_canvas.get_tk_widget()
+        widget.configure(bg=SUNKEN, highlightthickness=0)
+        widget.pack(fill="both", expand=True, padx=20, pady=(12, 4))
+        self._draw_selected_chart()
 
-        if self._live_plot_grid_mode:
-            n = len(self.angles)
-            cols = min(4, n)
-            rows = -(-n // cols)  # ceil division
-            fig = Figure(figsize=(3.1 * cols, 2.3 * rows), dpi=100)
-            fig.patch.set_facecolor("#2b2b2b")
-            for i, angle in enumerate(self.angles):
-                ax = fig.add_subplot(rows, cols, i + 1)
-                ax.set_facecolor("#1e1e1e")
-                ax.set_title(f"{angle:g}° — waiting...", color="white", fontsize=8)
-                ax.tick_params(colors="white", labelsize=6)
-                for spine in ax.spines.values():
-                    spine.set_color("#555555")
-                self._live_plot_axes[angle] = ax
-            fig.tight_layout(pad=1.4)
-        else:
-            fig = Figure(figsize=(6, 3), dpi=100)
-            fig.patch.set_facecolor("#2b2b2b")
-            ax = fig.add_subplot(111)
-            ax.set_facecolor("#1e1e1e")
-            ax.set_title("Waiting for solver output...", color="white", fontsize=9, wrap=True)
-            ax.tick_params(colors="white", labelsize=8)
-            for spine in ax.spines.values():
-                spine.set_color("#555555")
-            self._live_plot_axes["single"] = ax
-
-        self._live_plot_canvas = FigureCanvasTkAgg(fig, master=parent)
-        self._live_plot_canvas.draw()
-        self._live_plot_canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
-
-    def _update_live_plot(self, angle, data):
+    def _draw_selected_chart(self):
         canvas = getattr(self, "_live_plot_canvas", None)
         if canvas is None or not canvas.get_tk_widget().winfo_exists():
             return
-        axes = getattr(self, "_live_plot_axes", {})
-        grid_mode = getattr(self, "_live_plot_grid_mode", False)
-        ax = axes.get(angle) if grid_mode else axes.get("single")
-        if ax is None:
-            return
-        ax.clear()
-        ax.plot(data["time"], data["cd"], color="#4da3ff", label="Cd", linewidth=1.2 if grid_mode else 1.6)
-        ax.plot(data["time"], data["cl"], color="#e0a030", label="Cl", linewidth=1.2 if grid_mode else 1.6)
-        ax.set_title(f"{angle:g}°" if grid_mode else f"Angle {angle:g}° — live convergence",
-                     color="white", fontsize=8 if grid_mode else 10)
-        if not grid_mode:
-            ax.set_xlabel("Iteration", color="white", fontsize=8)
-        ax.set_facecolor("#1e1e1e")
-        ax.legend(fontsize=6 if grid_mode else 8, loc="upper right", facecolor="#2b2b2b", labelcolor="white")
-        ax.tick_params(colors="white", labelsize=6 if grid_mode else 8)
+        self._chart_dirty = False
+        fig = self._live_fig
+        fig.clear()
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(SUNKEN)
         for spine in ax.spines.values():
-            spine.set_color("#555555")
+            spine.set_visible(False)
+        ax.tick_params(colors=MUTED, labelsize=8, length=0)
+        ax.grid(axis="y", color=TRACK, linewidth=0.8)
+        ax.set_axisbelow(True)
+
+        data = self._live_data.get(self._selected_angle)
+        if not data:
+            stage = self._progress.get(self._selected_angle, {}).get("stage", "queued")
+            hint = "Waiting for the first coefficients…" if stage == "simpleFoam" else \
+                "Convergence appears once the solver starts."
+            ax.text(0.5, 0.5, hint, color=MUTED, ha="center", va="center", fontsize=10,
+                    transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        else:
+            iters = [t / self._progress[self._selected_angle]["delta_t"]
+                     if self._progress[self._selected_angle].get("delta_t") else t for t in data["time"]]
+            ax.plot(iters, data["cd"], color=ACCENT, linewidth=1.6, label="Cd")
+            ax2 = ax.twinx()
+            ax2.plot(iters, data["cl"], color=INK2, linewidth=1.6, label="Cl")
+            ax2.tick_params(colors=MUTED, labelsize=8, length=0)
+            for spine in ax2.spines.values():
+                spine.set_visible(False)
+            ax.set_xlabel("iteration", color=MUTED, fontsize=8)
+            handles = ax.get_lines() + ax2.get_lines()
+            ax.legend(handles, [h.get_label() for h in handles], loc="upper right", fontsize=8,
+                      frameon=False, labelcolor=INK3)
         canvas.draw_idle()
 
-    def _poll_live_coefficients(self, angle_directory, angle, stop_event):
-        # Mirrors run_commands_in_wsl's own wsl_work_dir naming so this reads
-        # the SAME in-progress case while it's still running there.
-        run_id = os.path.basename(angle_directory.rstrip("\\/"))
-        coeff_path = f"/tmp/aero_sim_{run_id}/postProcessing/forceCoeffs/0/coefficient.dat"
-        while not stop_event.wait(3):
-            try:
-                r = subprocess.run(["wsl", "-e", "bash", "-c", f'cat "{coeff_path}" 2>/dev/null'],
-                                    capture_output=True, text=True, timeout=10)
-            except Exception:
-                continue
-            if not r.stdout.strip():
-                continue
-            data = functions.parse_live_coefficients(r.stdout)
-            if data:
-                self.master.after(0, self._update_live_plot, angle, data)
-
-    def _set_progress(self, done, total, angle):
-        self.progress_bar.set(done / total if total else 0)
-        self.progress_status_label.configure(
-            text=f"Angle {angle}°  —  {done}/{total} simulation(s) completed")
+    def _update_live_plot(self, angle, data):
+        self._live_data[angle] = data
+        if angle == getattr(self, "_selected_angle", None):
+            self._chart_dirty = True
 
     def _run_simulations_worker(self):
         base_directory = os.path.join(APP_DIR, "Simulations")
         total = len(self.angles)
 
-        if self.parallel_var.get() and total > 1:
-            failed_angles = self._run_simulations_parallel(base_directory, total)
-        else:
-            failed_angles = self._run_simulations_sequential(base_directory, total)
+        stop_poll = threading.Event()
+        threading.Thread(target=self._progress_poller, args=(stop_poll,), daemon=True).start()
+        try:
+            if self.parallel_var.get() and total > 1:
+                failed_angles = self._run_simulations_parallel(base_directory, total)
+            else:
+                failed_angles = self._run_simulations_sequential(base_directory, total)
+        finally:
+            stop_poll.set()
 
-        base_directory = os.path.join(APP_DIR, "Simulations")
-        self.extract_results(base_directory)
+        self._log_event("All simulations finished — extracting results and generating plots...")
+        self.master.after(0, self._set_overall_status, "Extracting results and generating plots...")
+        try:
+            self.extract_results(base_directory)
+        except Exception as e:
+            self._log_event(f"ERROR extracting results: {e}")
+            self.master.after(0, self._set_overall_status, f"⚠ Result extraction failed: {e}")
+            raise
 
+        self._log_event("Results ready")
         self.master.after(0, self._on_simulation_complete, failed_angles)
 
     def _run_simulations_sequential(self, base_directory, total):
+        self._progress_slots = 1
         failed_angles = []
-        for i, angle in enumerate(self.angles, start=1):
+        for angle in self.angles:
             angle_directory = os.path.join(base_directory, f"Angle_{angle}")
             os.makedirs(angle_directory, exist_ok=True)  # Cria o diretório se não existir
-            stop_poll = threading.Event()
-            poll_thread = threading.Thread(target=self._poll_live_coefficients,
-                                            args=(angle_directory, angle, stop_poll), daemon=True)
-            poll_thread.start()
+            self.master.after(0, self._progress_angle_started, angle)
             success = self.run_commands_in_wsl(angle_directory)
-            stop_poll.set()
+            self.master.after(0, self._progress_angle_finished, angle, success)
             if not success:
                 failed_angles.append(angle)
-            self.master.after(0, self._set_progress, i, total, angle)
         return failed_angles
 
     def _run_simulations_parallel(self, base_directory, total):
@@ -1029,19 +1787,16 @@ class App:
         # that -- cap concurrency instead of launching every angle at the same
         # time, to keep this usable on a modest machine.
         max_workers = min(total, max(1, (os.cpu_count() or 4) // 2), 4)
+        self._progress_slots = max_workers
+        self._log_event(f"Running {total} angles in parallel, up to {max_workers} at a time")
         failed_angles = []
-        done_lock = threading.Lock()
-        done_count = 0
 
         def run_one(angle):
             angle_directory = os.path.join(base_directory, f"Angle_{angle}")
             os.makedirs(angle_directory, exist_ok=True)
-            stop_poll = threading.Event()
-            poll_thread = threading.Thread(target=self._poll_live_coefficients,
-                                            args=(angle_directory, angle, stop_poll), daemon=True)
-            poll_thread.start()
+            self.master.after(0, self._progress_angle_started, angle)
             success = self.run_commands_in_wsl(angle_directory)
-            stop_poll.set()
+            self.master.after(0, self._progress_angle_finished, angle, success)
             return angle, success
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1050,49 +1805,49 @@ class App:
                 angle, success = future.result()
                 if not success:
                     failed_angles.append(angle)
-                with done_lock:
-                    done_count += 1
-                    current_done = done_count
-                self.master.after(0, self._set_progress, current_done, total, angle)
         return failed_angles
 
     def _on_simulation_complete(self, failed_angles):
         self.clear_frame()
-        self._header(self.container, "Simulation Finished", "Results and plots have been saved.")
+        total = len(self.angles)
+        solved = total - len(failed_angles)
+        elapsed = time.monotonic() - getattr(self, "_run_started_at", time.monotonic())
+        self._nav_bar(self.container, self.main_menu, "New Simulation", self.main_menu,
+                      extra=[("Open Results Folder", self.open_results_folder)])
+        self._header(self.container, "Simulation Finished", "Results and plots have been saved.", step=6)
 
-        card = self._card(self.container)
+        rows = self._read_results_table()
+        not_converged = [r["angle"] for r in rows if not r["converged"]]
+
+        hero = ctk.CTkFrame(self.container, fg_color="transparent")
+        hero.pack(fill="x", padx=26, pady=(0, 10))
+        ctk.CTkLabel(hero, text=f"{solved} / {total}", font=FONT_HERO,
+                     text_color=ACCENT if not failed_angles else ALERT).pack(side="left")
+        text = ctk.CTkFrame(hero, fg_color="transparent")
+        text.pack(side="left", padx=(14, 0))
+        ctk.CTkLabel(text, text=f"angles solved in {functions.format_duration(elapsed)}",
+                     font=(FONT_FAMILY, 15, "bold"), text_color=INK, anchor="w").pack(fill="x")
+        notes = []
         if failed_angles:
-            ctk.CTkLabel(card, justify="left", wraplength=600, font=FONT_LABEL, text_color=WARN_COLOR,
-                         text=f"⚠ {len(failed_angles)} of {len(self.angles)} simulation(s) failed: {failed_angles}\n"
-                              "Check the console output for details.") \
-                .pack(padx=20, pady=20)
-        else:
-            ctk.CTkLabel(card, font=FONT_LABEL, text_color=RUN_COLOR,
-                         text=f"✓ All {len(self.angles)} simulation(s) completed successfully.") \
-                .pack(padx=20, pady=20)
-
+            notes.append(f"{len(failed_angles)} failed: {', '.join(f'{a:g}°' for a in failed_angles)} — "
+                         "check the log or console output.")
+        if not_converged:
+            notes.append("Not fully converged: " + ", ".join(f"{a}°" for a in not_converged) +
+                         " — treat their averages with care.")
         if self.last_validation:
             avg_err = self.last_validation["summary"]["rel_error_pct"].mean()
-            ctk.CTkLabel(card, justify="left", wraplength=600, font=FONT_HINT, text_color=MUTED_TEXT,
-                         text=f"Validated against a bundled reference dataset — average difference "
-                              f"{avg_err:.1f}% across the matching angles. See the \"validation_*\" "
-                              f"plots in View Results for details.\nSource: {self.last_validation['citation']}") \
-                .pack(padx=20, pady=(0, 16))
+            notes.append(f"Compared with a bundled reference dataset: {avg_err:.1f}% average difference "
+                         f"({self.last_validation['citation']}).")
+        if notes:
+            ctk.CTkLabel(text, text="\n".join(notes), font=(FONT_FAMILY, 12), text_color=MUTED,
+                         justify="left", anchor="w", wraplength=700).pack(fill="x")
 
-        actions = ctk.CTkFrame(self.container, fg_color="transparent")
-        actions.pack(fill="x", padx=30, pady=(10, 20), side="bottom")
-        self._secondary_button(actions, "Open Results Folder", self.open_results_folder, width=200) \
-            .pack(side="left")
-        self._secondary_button(actions, "View Results", self.results_viewer_screen, width=180) \
-            .pack(side="left", padx=(10, 0))
-        self._primary_button(actions, "Back to Main Menu", self.main_menu, width=200).pack(side="right")
+        self._build_results_body(self.container, rows)
 
         if failed_angles:
             messagebox.showwarning("Simulation Finished with Errors",
                 f"Simulation failed for angle(s): {failed_angles}.\n"
                 "Check the console output for details.")
-        else:
-            messagebox.showinfo("Simulation Complete:", "All simulations have been successfully completed!")
 
     def open_results_folder(self):
         results_dir = os.path.join(APP_DIR, "Results")
@@ -1100,6 +1855,93 @@ class App:
             os.startfile(results_dir)
         else:
             messagebox.showinfo("Results Folder", "No results folder found yet.")
+
+    def _read_results_table(self):
+        """Rows of Results/results.txt as dicts (angle label, Cd, Cl, y+ avg, converged)."""
+        path = os.path.join(APP_DIR, "Results", "results.txt")
+        rows = []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            return rows
+        for line in lines:
+            if not line.strip() or line.startswith("#") or ": " not in line:
+                continue
+            name, rest = line.split(": ", 1)
+            vals = rest.split("\t")
+            if len(vals) < 16:
+                continue
+            try:
+                numbers = [float(v) for v in vals]
+            except ValueError:
+                continue
+            cd, cl, yplus, conv = numbers[1], numbers[4], numbers[13], numbers[15]
+            if cd != cd:  # nan: no coefficients were produced for this angle
+                rows.append(dict(angle=name.replace("Angle_", ""), cd=None, cl=None, ld=None,
+                                 yplus=None, converged=False))
+                continue
+            rows.append(dict(angle=name.replace("Angle_", ""), cd=cd, cl=cl,
+                             ld=(cl / cd if cd else None), yplus=yplus, converged=bool(conv)))
+        return rows
+
+    def _build_results_body(self, parent, rows=None):
+        """Coefficient table (left) + plot picker and viewer (right)."""
+        if rows is None:
+            rows = self._read_results_table()
+        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=26, pady=(0, 10))
+        body.grid_columnconfigure(0, weight=0)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        # ---- coefficients table -------------------------------------------
+        if rows:
+            table = ctk.CTkScrollableFrame(body, corner_radius=11, fg_color=CARD, width=450)
+            table.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+            headers = ["Angle", "Cd", "Cl", "Cl/Cd", "y+ avg", "Converged"]
+            widths = [60, 74, 74, 66, 60, 100]
+            for col, (h, w) in enumerate(zip(headers, widths)):
+                self._caps_label(table, h, width=w).grid(row=0, column=col, sticky="w", padx=(8, 0), pady=(8, 6))
+            for r, row in enumerate(rows, start=1):
+                def fmt(v, spec):
+                    return "—" if v is None else format(v, spec)
+                cells = [f"{row['angle']}°", fmt(row["cd"], ".5f"), fmt(row["cl"], ".4f"),
+                         fmt(row["ld"], ".1f"), fmt(row["yplus"], ".1f")]
+                for col, text in enumerate(cells):
+                    ctk.CTkLabel(table, text=text, width=widths[col], anchor="w",
+                                 font=(FONT_MONO, 13), text_color=INK if col == 0 else INK2) \
+                        .grid(row=r, column=col, sticky="w", padx=(8, 0), pady=3)
+                if row["converged"]:
+                    ctk.CTkLabel(table, text="✓ yes", font=(FONT_MONO, 13), text_color=INK2, anchor="w",
+                                 width=widths[5]).grid(row=r, column=5, sticky="w", padx=(8, 0))
+                else:
+                    self._chip(table, "✕ no", fg=ALERT, text_color=BG).grid(row=r, column=5, sticky="w", padx=(8, 0))
+
+        # ---- plots --------------------------------------------------------
+        plots_dir = os.path.join(APP_DIR, "plots")
+        files = os.listdir(plots_dir) if os.path.isdir(plots_dir) else []
+        files = sorted((f for f in files if f.lower().endswith(".png")), key=self._plot_sort_key)
+        right = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
+        right.grid(row=0, column=1, sticky="nsew")
+        if not files:
+            ctk.CTkLabel(right, text="No plots found yet — run a simulation first.",
+                         font=FONT_LABEL, text_color=MUTED).pack(expand=True)
+            return
+        names = [os.path.splitext(f)[0] for f in files]
+        chips = ctk.CTkScrollableFrame(right, orientation="horizontal", height=44, fg_color="transparent")
+        chips.pack(fill="x", padx=10, pady=(8, 0))
+        self._plot_chip_buttons = {}
+        for name in names:
+            btn = ctk.CTkButton(chips, text=name.replace("_", " "), height=26, width=20, corner_radius=13,
+                                font=(FONT_FAMILY, 12), fg_color=TRACK, hover_color=BORDER_STRONG,
+                                text_color=INK2, command=lambda n=name: self._on_result_plot_selected(n))
+            btn.pack(side="left", padx=(0, 6))
+            self._plot_chip_buttons[name] = btn
+        self._result_image_frame = right
+        self._result_image_label = ctk.CTkLabel(right, text="")
+        self._result_image_label.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        self._on_result_plot_selected(names[0])
 
     # ------------------------------------------------------------------ #
     # Presets de configuração (salvar/carregar um JSON com o setup inteiro)
@@ -1213,39 +2055,10 @@ class App:
     # ------------------------------------------------------------------ #
     def results_viewer_screen(self):
         self.clear_frame()
-        self._header(self.container, "Results", "Browse the plots generated by the last simulation.")
-
-        plots_dir = os.path.join(APP_DIR, "plots")
-        files = os.listdir(plots_dir) if os.path.isdir(plots_dir) else []
-        files = sorted((f for f in files if f.lower().endswith(".png")), key=self._plot_sort_key)
-
-        if not files:
-            ctk.CTkLabel(self.container, text="No plots found yet — run a simulation first.",
-                         font=FONT_LABEL, text_color=MUTED_TEXT).pack(expand=True)
-            self._secondary_button(self.container, "← Back to Main Menu", self.main_menu, width=200) \
-                .pack(padx=30, pady=20, side="bottom", anchor="w")
-            return
-
-        names = [os.path.splitext(f)[0] for f in files]
-
-        picker_row = ctk.CTkFrame(self.container, fg_color="transparent")
-        picker_row.pack(fill="x", padx=30, pady=(0, 10))
-        ctk.CTkLabel(picker_row, text="Plot:", font=FONT_LABEL).pack(side="left", padx=(0, 10))
-        self._result_plot_menu = ctk.CTkOptionMenu(picker_row, values=names, width=220,
-                                                     command=self._on_result_plot_selected)
-        self._result_plot_menu.pack(side="left")
-        self._secondary_button(picker_row, "Open Results Folder", self.open_results_folder, width=180) \
-            .pack(side="right")
-
-        self._result_image_frame = ctk.CTkFrame(self.container, corner_radius=12)
-        self._result_image_frame.pack(fill="both", expand=True, padx=30, pady=(0, 10))
-        self._result_image_label = ctk.CTkLabel(self._result_image_frame, text="")
-        self._result_image_label.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self._secondary_button(self.container, "← Back to Main Menu", self.main_menu, width=200) \
-            .pack(padx=30, pady=(0, 20), side="bottom", anchor="w")
-
-        self._on_result_plot_selected(names[0])
+        self._nav_bar(self.container, self.main_menu, None, None,
+                      extra=[("Open Results Folder", self.open_results_folder)])
+        self._header(self.container, "Results", "Browse the results of the last simulation.", step=6)
+        self._build_results_body(self.container)
 
     @staticmethod
     def _plot_sort_key(filename):
@@ -1253,13 +2066,20 @@ class App:
         return (RESULT_PLOT_ORDER.index(name) if name in RESULT_PLOT_ORDER else len(RESULT_PLOT_ORDER), name)
 
     def _on_result_plot_selected(self, name):
+        for key, btn in getattr(self, "_plot_chip_buttons", {}).items():
+            if btn.winfo_exists():
+                btn.configure(fg_color=ACCENT if key == name else TRACK,
+                              text_color=BG if key == name else INK2)
         path = os.path.join(APP_DIR, "plots", f"{name}.png")
         try:
             img = Image.open(path)
         except Exception as e:
             self._result_image_label.configure(image=None, text=f"Could not open {name}.png: {e}")
             return
-        max_w, max_h = 820, 480
+        frame = self._result_image_frame
+        frame.update_idletasks()
+        max_w = max(frame.winfo_width() - 30, 360)
+        max_h = max(frame.winfo_height() - 70, 260)
         scale = min(max_w / img.width, max_h / img.height, 1.0)
         size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=size)
@@ -1306,12 +2126,123 @@ class App:
             return False
 
     # ------------------------------------------------------------------ #
-    # Incompressível
+    # Propriedades do escoamento (Incompressível / Compressível)
     # ------------------------------------------------------------------ #
-    def Incompressive_flow_variables_page(self):
-        self.clear_frame()
-        self._header(self.container, "Incompressible Simulation", "Set the flow properties for this run.")
+    @staticmethod
+    def _safe_get(var, default=None):
+        try:
+            return var.get()
+        except (tk.TclError, ValueError):
+            return default
 
+    def _flow_screen(self, title, run_command, speed_var, nu_var, basic_fields, adv_fields,
+                     adv_columns, reset_advanced, temperature_var=None):
+        self.clear_frame()
+        self._nav_bar(self.container, self.choose_simulation_type, "Run Simulation ▸", run_command,
+                      extra=[("Save Preset...", self.save_preset)])
+        self._header(self.container, title, "Set the flow properties for this run.", step=4)
+
+        body = ctk.CTkFrame(self.container, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=26, pady=(0, 8))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=0, minsize=290)
+        body.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkScrollableFrame(body, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+
+        # ---- velocity: the one input that matters, so it leads ----------
+        hero = ctk.CTkFrame(left, corner_radius=11, fg_color=CARD)
+        hero.pack(fill="x", pady=(0, 10))
+        self._caps_label(hero, "Flow velocity").pack(fill="x", padx=18, pady=(16, 4))
+        speed_row = ctk.CTkFrame(hero, fg_color="transparent")
+        speed_row.pack(fill="x", padx=18)
+        self._entry(speed_row, speed_var, height=46, font=(FONT_MONO, 20), border_color=BORDER_STRONG) \
+            .pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(speed_row, text="m/s", font=FONT_LABEL, text_color=MUTED).pack(side="left", padx=(10, 0))
+        helper = ctk.CTkLabel(hero, text="", font=FONT_HINT, text_color=INK3, anchor="w")
+        helper.pack(fill="x", padx=18, pady=(6, 0))
+
+        def update_helper():
+            if not helper.winfo_exists():
+                return
+            u, nu = self._safe_get(speed_var), self._safe_get(nu_var)
+            if not u or not nu or nu <= 0:
+                helper.configure(text="Reynolds and Mach numbers appear here once the velocity is set.")
+                return
+            temp = self._safe_get(temperature_var, 288.15) if temperature_var is not None else 288.15
+            sound = (1.4 * 287.05 * max(temp, 1.0)) ** 0.5
+            helper.configure(text=f"Re ≈ {u / nu:,.0f}  (chord = 1 m)   ·   Mach ≈ {abs(u) / sound:.2f}")
+
+        for var in (speed_var, nu_var) + ((temperature_var,) if temperature_var is not None else ()):
+            self._watch(var, update_helper)
+        update_helper()
+
+        if basic_fields:
+            grid = ctk.CTkFrame(hero, fg_color="transparent")
+            grid.pack(fill="x", padx=12, pady=(10, 0))
+            grid.grid_columnconfigure(tuple(range(len(basic_fields))), weight=1)
+            for idx, (label, var) in enumerate(basic_fields):
+                w, _ = self._labeled_entry(grid, label, var)
+                w.grid(row=0, column=idx, sticky="ew", padx=6)
+        ctk.CTkFrame(hero, height=16, fg_color="transparent").pack()
+
+        # ---- advanced parameters, hidden until asked for -----------------
+        self._switch(left, "Show advanced parameters",
+                     command=lambda: self._toggle_advanced(reset_advanced)).pack(anchor="w", pady=(4, 6))
+        self._adv_frame = ctk.CTkFrame(left, corner_radius=11, fg_color=CARD)
+        grid = ctk.CTkFrame(self._adv_frame, fg_color="transparent")
+        grid.pack(fill="x", padx=12, pady=12)
+        grid.grid_columnconfigure(tuple(range(adv_columns)), weight=1)
+        for idx, (label, var) in enumerate(adv_fields):
+            w, _ = self._labeled_entry(grid, label, var)
+            w.grid(row=idx // adv_columns, column=idx % adv_columns, sticky="ew", padx=6, pady=6)
+        self._adv_anchor = ctk.CTkFrame(left, height=1, fg_color="transparent")
+        self._adv_anchor.pack(fill="x")
+
+        self._add_parallel_toggle(left, padx=0)
+
+        # ---- run summary rail --------------------------------------------
+        rail = ctk.CTkFrame(body, corner_radius=11, fg_color=CARD)
+        rail.grid(row=0, column=1, sticky="new")
+        self._caps_label(rail, "Run summary").pack(fill="x", padx=18, pady=(16, 8))
+        self._summary_values = {}
+        for key in ("Airfoil", "Angles", "Mesh", "Solver", "Execution"):
+            row = ctk.CTkFrame(rail, fg_color="transparent")
+            row.pack(fill="x", padx=18, pady=3)
+            ctk.CTkLabel(row, text=key, font=FONT_HINT, text_color=MUTED, width=70, anchor="w").pack(side="left")
+            value = ctk.CTkLabel(row, text="", font=FONT_LABEL, text_color=INK, anchor="e",
+                                 justify="right", wraplength=180)
+            value.pack(side="right", fill="x", expand=True)
+            self._summary_values[key] = value
+        ctk.CTkFrame(rail, height=12, fg_color="transparent").pack()
+        self._watch(self.parallel_var, self._refresh_run_summary)
+        self._refresh_run_summary()
+
+    def _refresh_run_summary(self):
+        values = getattr(self, "_summary_values", None)
+        if not values or not values["Airfoil"].winfo_exists():
+            return
+        if self.airfoil == "airfoil_custom":
+            airfoil = os.path.basename(self.file1_path.get()) or "custom file"
+        else:
+            airfoil = f"NACA {self.naca_var.get()}" if self.naca_var.get() else "NACA"
+        angles = ", ".join(f"{a:g}°" for a in self.angles) or "—"
+        parallel = self.parallel_var.get() and len(self.angles) > 1
+        values["Airfoil"].configure(text=airfoil)
+        values["Angles"].configure(text=f"{angles}\n({len(self.angles)} case{'s' if len(self.angles) != 1 else ''})")
+        values["Mesh"].configure(text="Custom" if self.mesh_choice == "custom_mesh" else "Standard")
+        values["Solver"].configure(text="simpleFoam · SA")
+        values["Execution"].configure(text="Parallel" if parallel else "Sequential")
+
+    def _toggle_advanced(self, reset_advanced):
+        if self._adv_frame.winfo_ismapped():
+            self._adv_frame.pack_forget()
+            reset_advanced()  # hidden advanced values fall back to their defaults
+        else:
+            self._adv_frame.pack(fill="x", pady=(0, 10), before=self._adv_anchor)
+
+    def Incompressive_flow_variables_page(self):
         # Só cria com valores padrão na primeira vez -- preserva edições do
         # usuário (ou um preset carregado) ao navegar de volta pra cá.
         if not hasattr(self, "flow_speed_var_I"):
@@ -1321,48 +2252,19 @@ class App:
             self.nutilda_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
             self.nu_var_I = tk.DoubleVar(value=1e-5)
 
-        card = self._card(self.container)
-        wrap, _ = self._labeled_entry(card, "Flow velocity (m/s)", self.flow_speed_var_I)
-        wrap.pack(fill="x", padx=20, pady=20)
+        self._flow_screen(
+            "Incompressible Simulation", self.Simulation_Incompressible,
+            self.flow_speed_var_I, self.nu_var_I, [],
+            [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var), ("Nutilda", self.nutilda_var)],
+            adv_columns=4, reset_advanced=self.toggle_additional_fields_reset)
 
-        self.additional_fields_frame = ctk.CTkFrame(self.container, corner_radius=12)
-        adv_grid = ctk.CTkFrame(self.additional_fields_frame, fg_color="transparent")
-        adv_grid.pack(fill="x", padx=16, pady=16)
-        adv_grid.grid_columnconfigure((0, 1), weight=1)
-        adv_fields = [
-            ("nu", self.nu_var_I), ("P", self.p_var_I),
-            ("Nut", self.nut_var), ("Nutilda", self.nutilda_var),
-        ]
-        for idx, (label, var) in enumerate(adv_fields):
-            w, _ = self._labeled_entry(adv_grid, label, var)
-            w.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=6, pady=6)
+    def toggle_additional_fields_reset(self):
+        self.nut_var.set(DEFAULT_NUT_NUTILDA)  # Define valores padrão caso escondido
+        self.nutilda_var.set(DEFAULT_NUT_NUTILDA)
+        self.p_var_I.set(0.0)
+        self.nu_var_I.set(1e-5)
 
-        ctk.CTkSwitch(self.container, text="Show advanced parameters", font=FONT_LABEL,
-                      command=self.toggle_additional_fields).pack(anchor="w", padx=30, pady=(0, 4))
-        self._add_parallel_toggle(self.container)
-        self._add_save_preset_button(self.container)
-
-        self.nav_bar_I = self._nav_bar(self.container, self.main_menu, "Run Simulation",
-                                        self.Simulation_Incompressible,
-                                        next_color=RUN_COLOR, next_hover=RUN_HOVER)
-
-    def toggle_additional_fields(self):
-        if self.additional_fields_frame.winfo_ismapped():
-            self.additional_fields_frame.pack_forget()  # Esconde os campos
-            self.nut_var.set(DEFAULT_NUT_NUTILDA)  # Define valores padrão caso escondido
-            self.nutilda_var.set(DEFAULT_NUT_NUTILDA)
-            self.p_var_I.set(0.0)
-            self.nu_var_I.set(1e-5)
-        else:
-            self.additional_fields_frame.pack(fill="x", padx=30, pady=(0, 10), before=self.nav_bar_I)
-
-    # ------------------------------------------------------------------ #
-    # Compressível
-    # ------------------------------------------------------------------ #
     def Compressive_flow_variables_page(self):
-        self.clear_frame()
-        self._header(self.container, "Compressible Simulation", "Set the flow properties for this run.")
-
         if not hasattr(self, "flow_speed_var_c"):
             self.flow_speed_var_c = tk.DoubleVar()
             self.p_var_c = tk.DoubleVar(value=1e5)
@@ -1373,52 +2275,22 @@ class App:
             self.omega_var = tk.DoubleVar(value=0.1)
             self.nu_var_c = tk.DoubleVar(value=1e-6)
 
-        card = self._card(self.container)
-        grid = ctk.CTkFrame(card, fg_color="transparent")
-        grid.pack(fill="x", padx=20, pady=20)
-        grid.grid_columnconfigure((0, 1, 2), weight=1)
-        basic_fields = [
-            ("Flow velocity (m/s)", self.flow_speed_var_c),
-            ("P (pressure)", self.p_var_c),
-            ("T (temperature K)", self.t_var),
-        ]
-        for idx, (label, var) in enumerate(basic_fields):
-            w, _ = self._labeled_entry(grid, label, var)
-            w.grid(row=0, column=idx, sticky="ew", padx=6)
+        self._flow_screen(
+            "Compressible Simulation", self.simulation_Compressible,
+            self.flow_speed_var_c, self.nu_var_c,
+            [("P (pressure)", self.p_var_c), ("T (temperature K)", self.t_var)],
+            [("Alphat", self.alphat_var), ("k", self.k_var), ("Nut", self.nut_var_c),
+             ("Omega", self.omega_var), ("Nu", self.nu_var_c)],
+            adv_columns=3, reset_advanced=self.toggle_additional_fields_compressive_reset,
+            temperature_var=self.t_var)
 
-        self.additional_fields_frame_compressive = ctk.CTkFrame(self.container, corner_radius=12)
-        adv_grid = ctk.CTkFrame(self.additional_fields_frame_compressive, fg_color="transparent")
-        adv_grid.pack(fill="x", padx=16, pady=16)
-        adv_grid.grid_columnconfigure((0, 1), weight=1)
-        adv_fields = [
-            ("Alphat", self.alphat_var), ("k", self.k_var),
-            ("Nut", self.nut_var_c), ("Omega", self.omega_var),
-            ("Nu", self.nu_var_c),
-        ]
-        for idx, (label, var) in enumerate(adv_fields):
-            w, _ = self._labeled_entry(adv_grid, label, var)
-            w.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=6, pady=6)
-
-        ctk.CTkSwitch(self.container, text="Show advanced parameters", font=FONT_LABEL,
-                      command=self.toggle_additional_fields_compressive).pack(anchor="w", padx=30, pady=(0, 4))
-        self._add_parallel_toggle(self.container)
-        self._add_save_preset_button(self.container)
-
-        self.nav_bar_c = self._nav_bar(self.container, self.main_menu, "Run Simulation",
-                                        self.simulation_Compressible,
-                                        next_color=RUN_COLOR, next_hover=RUN_HOVER)
-
-    def toggle_additional_fields_compressive(self):
-        if self.additional_fields_frame_compressive.winfo_ismapped():
-            self.additional_fields_frame_compressive.pack_forget()  # Esconde os campos
-            # Define valores padrão caso escondido
-            self.alphat_var.set(0.1)
-            self.k_var.set(0.1)
-            self.nut_var_c.set(0.1)
-            self.omega_var.set(0.1)
-            self.nu_var_c.set(1e-6)
-        else:
-            self.additional_fields_frame_compressive.pack(fill="x", padx=30, pady=(0, 10), before=self.nav_bar_c)
+    def toggle_additional_fields_compressive_reset(self):
+        # Define valores padrão caso escondido
+        self.alphat_var.set(0.1)
+        self.k_var.set(0.1)
+        self.nut_var_c.set(0.1)
+        self.omega_var.set(0.1)
+        self.nu_var_c.set(1e-6)
 
     # ------------------------------------------------------------------ #
     # Pós-processamento (lógica preservada)
