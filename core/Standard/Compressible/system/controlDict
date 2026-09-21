@@ -22,7 +22,7 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         2.5;
+endTime         4;   // safety ceiling (4000 iterations); the run normally stops earlier
 
 deltaT          0.001;
 

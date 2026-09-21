@@ -47,12 +47,8 @@ SIMPLE
 {
     nNonOrthogonalCorrectors 0;
     consistent yes;
-    residualControl
-    {
-        p               1e-6;
-        U               1e-6;
-        nuTilda         1e-4;
-    }
+    // No residualControl: residuals depend on the mesh, so the run stops on Cd/Cl
+    // stability instead (convergenciaCoeficientes in system/forces).
 }
 
 relaxationFactors

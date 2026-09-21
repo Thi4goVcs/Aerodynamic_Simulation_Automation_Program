@@ -1628,7 +1628,7 @@ class App:
             elif eta is None:
                 self.progress_eta_label.configure(text="estimating…", font=(FONT_FAMILY, 20, "bold"))
             else:
-                self.progress_eta_label.configure(text=f"≈ {functions.format_duration(eta)}", font=FONT_HERO)
+                self.progress_eta_label.configure(text=f"up to {functions.format_duration(eta)}", font=FONT_HERO)
         overall = f"{finished}/{total} finished  ·  {running} running  ·  {queued} queued"
         self.progress_status_label.configure(text=self._progress_status_override or overall)
 
@@ -1662,9 +1662,10 @@ class App:
 
         if stage == "simpleFoam":
             rate = functions.iteration_rate(st["samples"])
-            line = f"Iteration {st['iter']}" + (f" of {st['max_iter']}" if st["max_iter"] else "")
+            line = f"Iteration {st['iter']}" + (f" (limit {st['max_iter']}, stops earlier once Cd/Cl settle)" if st["max_iter"] else "")
             if rate and st["max_iter"]:
-                line += f"  ·  ~{functions.format_duration((st['max_iter'] - st['iter']) / rate)} left  ·  {rate:.1f} it/s"
+                line += (f"  ·  up to ~{functions.format_duration((st['max_iter'] - st['iter']) / rate)} left"
+                         f"  ·  {rate:.1f} it/s")
             else:
                 line += "  ·  estimating time left…"
         elif stage == "queued":

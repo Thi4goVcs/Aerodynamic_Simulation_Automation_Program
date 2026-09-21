@@ -1297,13 +1297,14 @@ def summarize_coefficient_history(coefficient_path, avg_fraction=0.2, min_avg_ro
     primary_cols = [1, 4]
     first_half_mean = tail.iloc[:half, primary_cols].mean()
     second_half_mean = tail.iloc[-half:, primary_cols].mean()
-    # A coefficient counts as converged if it changed by < 2% relative, OR
-    # by less than an absolute tolerance -- at some angles Cd/Cl sit so
-    # close to zero that a tiny, physically negligible absolute wobble
-    # would otherwise read as a huge (meaningless) relative percentage.
-    # The reported rel_change is floored against that same tolerance so it
-    # stays a legible number instead of blowing up near a zero crossing.
-    abs_tolerance = 2e-3
+    # A coefficient counts as converged if it changed by < 2% relative, OR by
+    # less than an absolute tolerance -- near a zero crossing (Cl at 0 deg) a
+    # tiny, physically negligible wobble would otherwise read as a huge
+    # relative percentage. The absolute tolerance has to be per coefficient: Cd
+    # is ~0.01, so the 2e-3 that suits Cl would accept a 20% Cd drift as
+    # "converged". These match the stop criterion in system/forces
+    # (convergenciaCoeficientes), which is also absolute per coefficient.
+    abs_tolerance = pd.Series({1: 1e-4, 4: 2e-3})
     abs_change = (second_half_mean - first_half_mean).abs()
     rel_change = abs_change / second_half_mean.abs().clip(lower=abs_tolerance)
     converged = bool(((rel_change < 0.02) | (abs_change < abs_tolerance)).all())

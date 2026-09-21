@@ -34,7 +34,48 @@
          magUInf $U_mag;
          lRef 1.0;
          Aref 0.01;
-         writeControl outputTime;
+         // one row every 10 iterations (was every 100): the run can now stop
+         // early, and 20 samples gave the convergence check almost nothing to look at
+         writeControl timeStep;
+         writeInterval 10;
+     }
+
+     // Stops the run when Cd and Cl have stopped moving: each one's instantaneous
+     // value stays within `tolerance` (ABSOLUTE) of its own moving average over
+     // `window` (in TIME, so 0.2 = 200 iterations at deltaT 0.001). Both must hold
+     // (same groupID; ungrouped conditions would stop on either one). Unlike
+     // residualControl this does not depend on the mesh. endTime in controlDict is
+     // only the safety ceiling. Checked every iteration, whatever writeInterval is.
+     convergenciaCoeficientes
+     {
+         type            runTimeControl;
+         libs            (utilityFunctionObjects);
+         conditions
+         {
+             cdEstavel
+             {
+                 type            average;
+                 functionObject  forceCoeffs;
+                 fields          (Cd);
+                 tolerance       1e-4;
+                 window          0.2;
+                 windowType      exact;
+                 nIterStartUp    500;
+                 groupID         1;
+             }
+             clEstavel
+             {
+                 type            average;
+                 functionObject  forceCoeffs;
+                 fields          (Cl);
+                 tolerance       1e-3;
+                 window          0.2;
+                 windowType      exact;
+                 nIterStartUp    500;
+                 groupID         1;
+             }
+         }
+         satisfiedAction end;
      }
 
 

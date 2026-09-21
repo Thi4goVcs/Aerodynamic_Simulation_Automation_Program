@@ -35,12 +35,8 @@ solvers
 
 SIMPLE
 {
-    residualControl
-    {
-        p               1e-4;
-        U               1e-4;
-        "(k|omega|e)"   1e-4;
-    }
+    // No residualControl: residuals depend on the mesh, so the run stops on Cd/Cl
+    // stability instead (convergenciaCoeficientes in system/forces).
 
     nNonOrthogonalCorrectors 0;
     pMinFactor      0.1;
