@@ -21,3 +21,4 @@ __pycache__/
 /coordenadas.dat
 /Results/
 /plots/
+.aerosim_run.lock

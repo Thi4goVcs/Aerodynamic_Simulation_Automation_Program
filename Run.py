@@ -5,6 +5,8 @@ import subprocess
 import shutil
 import threading
 import time
+import uuid
+import atexit
 import concurrent.futures
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -159,6 +161,8 @@ class App:
         self.env_status = {"checked": False, "wsl_ok": False, "openfoam_ok": False, "detail": ""}
         self.last_validation = None
         self._env_banner = None
+        self._run_token = None
+        atexit.register(self._release_run_lock)
 
         self.master.title("Aerodynamic Simulation Automation Program")
         self.master.geometry("1000x780")
@@ -815,7 +819,7 @@ class App:
         # Meshing (blockMesh/checkMesh) doesn't depend on the flow type, so the
         # Incompressible template is reused as a disposable meshing sandbox
         # regardless of which flow type the user picks on the next screen.
-        wsl_work_dir = "/tmp/aero_mesh_preview"
+        wsl_work_dir = f"/tmp/aero_mesh_preview_{uuid.uuid4().hex[:8]}"
         command = (
             f'rm -rf "{wsl_work_dir}"; mkdir -p "{wsl_work_dir}"; '
             f'cp -r "{template_unix}/." "{wsl_work_dir}/"; '
@@ -1025,9 +1029,38 @@ class App:
             return False
         return True
 
+    # ------------------------------------------------------------------ #
+    # Uma rodada por vez + diretorios de trabalho unicos no WSL
+    # ------------------------------------------------------------------ #
+    RUN_LOCK_PATH = os.path.join(APP_DIR, ".aerosim_run.lock")
+
+    def _acquire_run_lock(self):
+        """Simulations/ e os diretorios do WSL sao apagados e recriados a cada
+        rodada, entao duas rodadas ao mesmo tempo destroem uma a outra."""
+        ok, info = functions.acquire_run_lock(self.RUN_LOCK_PATH)
+        if not ok:
+            messagebox.showwarning(
+                "A simulation is already running",
+                f"Another instance of this app (PID {info.get('pid')}, started at {info.get('started')}) "
+                "is running simulations in this folder. Starting a second run now would delete its data.\n\n"
+                "Wait for it to finish, or close it first.")
+            return False
+        self._run_token = f"{int(time.time())}_{os.getpid()}"
+        return True
+
+    def _release_run_lock(self):
+        functions.release_run_lock(self.RUN_LOCK_PATH)
+
+    def _wsl_case_id(self, angle):
+        """Name of this run's working directory (under /tmp/aero_sim_) for an angle."""
+        token = getattr(self, "_run_token", None)
+        return f"{token}_Angle_{angle}" if token else f"Angle_{angle}"
+
     def Simulation_Incompressible(self):
         self.simulation_tipo = "Incompressible"
         if not self.process_angles():  # Processa os ângulos
+            return
+        if not self._acquire_run_lock():
             return
         source_directory = "core\\Standard\\Incompressible"
         target_directory = "Simulations"
@@ -1038,6 +1071,8 @@ class App:
     def simulation_Compressible(self):
         self.simulation_tipo = "Compressible"
         if not self.process_angles():  # Processa os ângulos
+            return
+        if not self._acquire_run_lock():
             return
         source_directory = "core\\Standard\\Compressible"
         target_directory = "Simulations"
@@ -1062,6 +1097,7 @@ class App:
 
     def execute_mesh_operations(self):
         if not self.process_angles():
+            self._release_run_lock()
             return
         source_file = "mesh_standard"
         base_directory = "Simulations"
@@ -1138,14 +1174,17 @@ class App:
                 if self.simulation_tipo == "Incompressible":
                     functions.variables_incompressible(orig_directory_path, angle, flow_speed, Pressure,
                                                          nut_value, nutilda_value, nu_value_I)
+                    functions.verify_initial_conditions(orig_directory_path, flow_speed)
                 elif self.simulation_tipo == "Compressible":
                     functions.variables_compressible(orig_directory_path, angle, flow_speed, Pressure,
                                                        nut_value, T_value, omega_value, k_value,
                                                        alphat_value, nu_value_c)
+                    functions.verify_initial_conditions(orig_directory_path, flow_speed)
             except Exception as e:
                 messagebox.showerror("Mesh Generation Error",
                     f"Failed to generate mesh for angle {angle}: {e}\n\n"
                     "Check the mesh parameters (e.g. avoid zero values) and try again.")
+                self._release_run_lock()
                 return
 
             print(f"File '{source_file}' copied and renamed to '{destination_file_path}' after running blockMeshDirect for angle {angle}")
@@ -1432,7 +1471,7 @@ class App:
     def _progress_poller(self, stop_event):
         # One wsl call per cycle covers every angle, so parallel runs cost no
         # more polling than a sequential one.
-        run_ids = [f"Angle_{angle}" for angle in self.angles]
+        run_ids = [self._wsl_case_id(angle) for angle in self.angles]
         command = functions.build_progress_poll_command(run_ids)
         while not stop_event.wait(2.5):
             try:
@@ -1450,7 +1489,7 @@ class App:
             st = self._progress[angle]
             if st["stage"] in ("done", "failed"):
                 continue
-            info = snapshot.get(f"Angle_{angle}")
+            info = snapshot.get(self._wsl_case_id(angle))
             if info is None:
                 continue
             stage = functions.stage_from_logs(info["stages"])
@@ -1745,6 +1784,12 @@ class App:
             self._chart_dirty = True
 
     def _run_simulations_worker(self):
+        try:
+            self._run_simulations_worker_inner()
+        finally:
+            self._release_run_lock()
+
+    def _run_simulations_worker_inner(self):
         base_directory = os.path.join(APP_DIR, "Simulations")
         total = len(self.angles)
 
@@ -2095,6 +2140,8 @@ class App:
     def run_commands_in_wsl(self, directory):
         unix_path = directory.replace("\\", "/").replace("C:/", "/mnt/c/")
         run_id = os.path.basename(directory.rstrip("\\/"))
+        if getattr(self, "_run_token", None):
+            run_id = f"{self._run_token}_{run_id}"
         # OpenFOAM rejects spaces (and other special characters) in a case's
         # resolved path (fileName::stripInvalid), which breaks any project
         # checked out under a path like ".../Área de Trabalho/...". Reading

@@ -903,7 +903,93 @@ def blockMeshDirect_Custom(alpha, distance_to_inlet, distance_to_outlet,cell_siz
 
 import math
 
+# ---------------------------------------------------------------------------
+# Protecao contra rodadas simultaneas e contra escrita no template
+# ---------------------------------------------------------------------------
+def pid_alive(pid):
+    """True se existe um processo com esse PID. Nao usa os.kill(pid, 0): no
+    Windows qualquer sinal diferente de CTRL_* termina o processo."""
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        SYNCHRONIZE, WAIT_TIMEOUT = 0x00100000, 0x102
+        handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def acquire_run_lock(lock_path, pid=None, started=None):
+    """Reserva a pasta Simulations/ para esta execucao do app.
+
+    Retorna (True, None) se conseguiu, ou (False, info) se OUTRA instancia viva
+    ja esta rodando (info = {"pid": ..., "started": ...}). Uma trava deixada por
+    um processo que ja morreu e ignorada e sobrescrita."""
+    import json
+    import time as _time
+    pid = os.getpid() if pid is None else pid
+    started = _time.strftime("%H:%M:%S") if started is None else started
+    try:
+        with open(lock_path, "r", encoding="utf-8") as fh:
+            info = json.load(fh)
+        if info.get("pid") != pid and pid_alive(info.get("pid")):
+            return False, info
+    except (OSError, ValueError):
+        pass
+    with open(lock_path, "w", encoding="utf-8") as fh:
+        json.dump({"pid": pid, "started": started}, fh)
+    return True, None
+
+
+def release_run_lock(lock_path, pid=None):
+    """Remove a trava, mas so se ela pertence a este processo."""
+    import json
+    pid = os.getpid() if pid is None else pid
+    try:
+        with open(lock_path, "r", encoding="utf-8") as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if info.get("pid") == pid:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
+
+def _refuse_template_dir(directory):
+    """As funcoes que escrevem initialConditions so podem escrever na pasta de
+    um caso (Simulations/Angle_X/0.orig), nunca em core/Standard/, senao a
+    saida de uma rodada vira o "template" de todas as seguintes."""
+    parts = [p.lower() for p in re.split(r"[\\/]+", os.path.abspath(str(directory)))]
+    for i in range(len(parts) - 1):
+        if parts[i] == "core" and parts[i + 1] == "standard":
+            raise ValueError(f"Refusing to write case values into the template directory: {directory}")
+
+
+def verify_initial_conditions(directory, expected_speed):
+    """Confere, lendo o arquivo de volta, que U_mag e o pedido nesta rodada
+    (e nao um valor herdado de uma rodada antiga)."""
+    with open(f"{directory}/initialConditions", "r") as fh:
+        match = re.search(r"^U_mag\s+([^;\s]+)\s*;", fh.read(), flags=re.M)
+    if not match or abs(float(match.group(1)) - float(expected_speed)) > 1e-9 * max(1.0, abs(float(expected_speed))):
+        found = match.group(1) if match else "missing"
+        raise ValueError(f"{directory}/initialConditions has U_mag {found}, expected {expected_speed}")
+
+
 def variables_incompressible(directory, angle, num_mech,p,nut_value,nutilda_value,nu_value_I):
+    _refuse_template_dir(directory)
     # Converting the angle to radians
     angle_rad = math.radians(angle)
     # Calculating U based on the given number of mechanisms
@@ -950,6 +1036,7 @@ FoamFile
 # You do not need to explicitly close the file when using 'with open'.
 
 def variables_compressible(directory, angle, num_mech,p,nut_value,T,omega,k,alphat,nu_value_I):
+    _refuse_template_dir(directory)
     # Converting the angle to radians
     angle_rad = math.radians(angle)
     # Calculating U based on the given number of mechanisms
