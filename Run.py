@@ -889,7 +889,7 @@ class App:
         if polygons:
             xs = [p[0] for poly in polygons for p in poly]
             ys = [p[1] for poly in polygons for p in poly]
-            coll = PolyCollection(polygons, facecolors="none", edgecolors=BORDER_STRONG, linewidths=0.35)
+            coll = PolyCollection(polygons, facecolors="none", edgecolors="#7d766f", linewidths=0.3)
             ax.add_collection(coll)
             ax.set_xlim(max(-0.3, min(xs)), min(1.3, max(xs)))
             ax.set_ylim(max(-0.6, min(ys)), min(0.6, max(ys)))
@@ -1755,6 +1755,8 @@ class App:
         ax.set_axisbelow(True)
 
         data = self._live_data.get(self._selected_angle)
+        if data and len(data["time"]) < 2:
+            data = None  # one point draws nothing useful; wait for a second sample
         if not data:
             stage = self._progress.get(self._selected_angle, {}).get("stage", "queued")
             hint = "Waiting for the first coefficients…" if stage == "simpleFoam" else \
