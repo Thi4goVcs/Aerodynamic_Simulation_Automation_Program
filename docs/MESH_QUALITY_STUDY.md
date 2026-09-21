@@ -274,6 +274,73 @@ em 18-49%, em todos os ângulos**. Candidatos, em ordem de suspeita:
    real: a resolução está no lugar errado.
 4. **O salto de 33×** na emenda da graduação em y.
 
+## Domínio maior, salto de graduação e y+ (medições de 2026-09-19)
+
+### Custo de aumentar o domínio
+
+Medido com `blockMeshDirect_Custom` (que já aceita `distance_to_inlet`/`outlet`),
+NACA 0012 a 10°. O solver roda 2000 iterações fixas (`endTime 2`, `deltaT 0.001`),
+então o custo por rodada é proporcional ao número de células:
+
+| Opção | Células | Custo | Não-ortog. | Salto em y | Célula da esteira no bordo de fuga |
+|---|---|---|---|---|---|
+| 20 cordas (hoje) | 200.000 | 1,00× | 77,1 | 33× | 0,0026 |
+| 50 cordas, esticando | 200.000 | 1,00× | 76,6 | 13× | 0,0066 (2,5× mais grossa) |
+| 100 cordas, esticando | 200.000 | 1,00× | 76,4 | 6,5× | 0,0132 (5× mais grossa) |
+| 50 cordas + células | 224.700 | 1,12× | 74,9 | 14× | 0,0056 |
+| 100 cordas + células | 244.160 | 1,22× | 73,2 | 7,6× | 0,0102 |
+
+Como a graduação é geométrica, distância extra sai barata: esticar não custa nada
+e não piora nenhuma métrica do `checkMesh`, mas engrossa a esteira logo atrás do
+bordo de fuga, porque a razão total `O16 = 200` da esteira é fixa. Ressalva: com
+iterações fixas, um domínio maior pode convergir menos no mesmo número de passos.
+
+### O salto de 33×
+
+A graduação em y tem duas seções independentes. A seção 1 (parede até 0,2 corda)
+termina com células de 6,15·10⁻³; a seção 2 começa com 1,89·10⁻⁴, um tamanho que
+ninguém escolheu (sai de `O13 = D11/H8`). A malha precisa de **38 células** (19% das
+200 na direção normal) só para voltar ao tamanho de antes do salto, numa faixa de
+0,2 a 0,263 corda **ao redor do perfil inteiro** (blocos 1 e 3) e ao longo da
+esteira. É o único defeito medido que fica perto do perfil.
+
+Começando a seção 2 onde a 1 termina (crescimento de 1,1), a resolução a partir de
+~0,4 corda fica praticamente igual (0,076 vs 0,081 em y=1; 0,174 vs 0,173 em y=2),
+com **160 células em vez de 200** — e só 177 para um domínio de 100 cordas. Ou seja,
+corrigir o salto paga o domínio maior.
+
+### y+
+
+SA com `nutUSpaldingWallFunction` (válida para qualquer y+). Medido: média 31-34,
+mas máximo 41 (0°) → 148 (15°): a primeira célula tem a mesma altura ao longo de
+toda a corda, e o cisalhamento se concentra no bordo de ataque conforme o ângulo
+sobe. A referência NASA TMR para este caso usa y+ < 1 e obtém Cd ≈ 0,0081 — o
+experimento de Ladson —, o que torna a estratégia de parede o suspeito principal
+do Cd alto.
+
+## Versão de release (2026-09-21): salto corrigido + y+ como parâmetro
+
+Portado para o projeto original: `_outer_ratio_continuous` (salto de 32,6× → 0,91×)
+e `first_cell_height_for_yplus` com `DEFAULT_TARGET_YPLUS = 33.41`, que reproduz a
+malha validada com diferença ≤ 7,5·10⁻⁷ entre 10 e 340 m/s. Exposto na UI como
+"Wall y+ target". Não portados: domínio de 100 cordas (piorou Cl) e graduação da
+esteira por alvo (neutra em 20 cordas).
+
+`checkMesh` (NACA 0012, 0-15°, 200 mil células): não-ortogonalidade 77,1 → 57,4;
+razão de aspecto 661 → 370; assimetria máx. 1,40 → 1,08; 0 reprovações.
+
+Validação, mesmo driver e solver da v1 (iterações 1777/2000/2000/2000, iguais à v1):
+
+| Ângulo | Cl erro v1 → release | Cd erro v1 → release |
+|---|---|---|
+| 0° | 103,6 → 103,7 | 18,17 → 18,13 |
+| 5° | 7,70 → 7,69 | 27,00 → 26,82 |
+| 10° | 7,61 → 7,61 | 27,84 → 27,26 |
+| 15° (não convergido) | 8,97 → 9,24 | 48,87 → 50,66 |
+
+Sem regressão: 0/5/10° iguais ou levemente melhores; a variação em 15° está dentro
+da deriva desse caso (−6% no último quarto). Malha mais limpa, resultado preservado.
+
 ## Melhorias estruturais no gerador (não são de qualidade de malha, mas travam a evolução)
 
 - `blockMeshDirect` e `blockMeshDirect_Custom` têm 309 linhas de corpo cada, das

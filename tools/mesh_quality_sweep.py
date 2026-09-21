@@ -275,10 +275,15 @@ def parse_set_locations(log):
         if not xs:
             continue
         stats["%s_n_points" % name] = len(xs)
+        # o centroide engana quando o conjunto e simetrico (metade em cima, metade
+        # embaixo, ou metade na entrada e metade na saida): ele cai no meio, onde
+        # nao ha ponto nenhum. A fracao perto do perfil e a faixa sao confiaveis.
         stats["%s_centroid_x" % name] = round(sum(xs) / len(xs), 4)
         stats["%s_centroid_y" % name] = round(sum(ys) / len(ys), 4)
         stats["%s_xmin" % name] = round(min(xs), 4)
         stats["%s_xmax" % name] = round(max(xs), 4)
+        stats["%s_ymin" % name] = round(min(ys), 4)
+        stats["%s_ymax" % name] = round(max(ys), 4)
         stats["%s_near_field_frac" % name] = round(near / len(xs), 4)
     return stats
 

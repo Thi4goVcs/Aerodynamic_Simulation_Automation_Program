@@ -147,25 +147,51 @@ def _solve_expansion_ratio_for_first_cell(target_first_cell, thickness, n_cells,
     return (lo + hi) / 2
 
 
+# A altura da primeira celula sai de  altura = y+ * nu / u_tau,  com u_tau
+# estimado por Schlichting. Essa estimativa superestima o y+ real desta malha:
+# numa rodada medida (10 graus, Re=6e6) a primeira celula de 3.283e-4 corda deu
+# y+ medio 33.41, contra 73.52 previstos -- dai o fator de calibracao.
+_YPLUS_CALIBRATION = 33.41 / 73.52
+
+# Com este valor a malha e identica a validada contra Ladson/NASA TM 4074 em
+# qualquer velocidade. y+ ~ 1 (malha resolvida ate a parede) funciona, mas nos
+# testes de 2026-09 deu Cd pior -- ver docs/MESH_QUALITY_STUDY.md.
+DEFAULT_TARGET_YPLUS = 33.41
+
+
+def first_cell_height_for_yplus(target_yplus, velocity, nu, chord=1.0):
+    """Altura da primeira celula na parede para um y+ alvo: y+ * nu / u_tau."""
+    scale = _wall_shear_scale(velocity, nu, chord)  # u_tau / nu
+    return target_yplus / (scale * _YPLUS_CALIBRATION)
+
+
 def expansion_ratio_for_flow(velocity, nu, chord=1.0,
                               boundary_layer_thickness=_REFERENCE_BOUNDARY_LAYER_THICKNESS,
-                              n_cells=_REFERENCE_N_BOUNDARY_LAYER_CELLS):
+                              n_cells=_REFERENCE_N_BOUNDARY_LAYER_CELLS,
+                              target_yplus=DEFAULT_TARGET_YPLUS):
     """
-    Escala a razao de expansao da camada limite para manter, aproximadamente,
-    o mesmo y+ do regime de referencia (validado empiricamente com uma
-    simulacao real: y+ ~= 37-48 em velocity=15 m/s, nu=1e-5, Re=1.5e6) em
-    qualquer outra velocidade/numero de Reynolds. Cai de volta no valor
-    historico se velocity/nu vierem invalidos.
+    Razao de expansao da camada limite que entrega o y+ alvo na parede, em
+    qualquer velocidade/Reynolds. Abaixo de Re ~9e5 a celula pedida fica maior
+    que o espacamento uniforme do bloco e a busca satura (malha uniforme).
+    Cai no valor historico se velocity/nu vierem invalidos.
     """
     if not velocity or not nu:
         return _REFERENCE_EXPANSION_RATIO
-    ref_first_cell = _boundary_layer_first_cell(
-        _REFERENCE_BOUNDARY_LAYER_THICKNESS, _REFERENCE_EXPANSION_RATIO,
-        _REFERENCE_N_BOUNDARY_LAYER_CELLS)
-    ref_scale = _wall_shear_scale(_REFERENCE_VELOCITY, _REFERENCE_NU, chord)
-    new_scale = _wall_shear_scale(velocity, nu, chord)
-    target_first_cell = ref_first_cell * (ref_scale / new_scale)
+    target_first_cell = first_cell_height_for_yplus(target_yplus, velocity, nu, chord)
     return _solve_expansion_ratio_for_first_cell(target_first_cell, boundary_layer_thickness, n_cells)
+
+
+def _outer_ratio_continuous(inner_last_cell, outer_length, n_cells, growth=1.1):
+    """
+    Razao de expansao do trecho externo da graduacao em y, comecando de onde o
+    trecho da camada limite termina. Antes ela vinha de `O13 = D11/H8`, um tamanho
+    que ninguem escolhia: a celula encolhia 33x na emenda em y=0,2 corda, em volta
+    do perfil inteiro, e a malha gastava 38 camadas so para voltar ao tamanho
+    anterior.
+    """
+    ratio = _solve_expansion_ratio_for_first_cell(inner_last_cell * growth,
+                                                  outer_length, n_cells)
+    return ratio ** (n_cells - 1)
 
 
 # A aresta de saida dos blocos da esteira tinha sua razao de expansao derivada da
@@ -257,7 +283,8 @@ def blockMeshDirect(Alpha, first_layer_thickness=None, expansion_ratio=None):
 
         H8 = E8 * F8 ** N10
         O10 = F8 ** N10
-        O13 = D11 / H8
+        O13 = _outer_ratio_continuous(_boundary_layer_first_cell(D8, F8, N10) * F8 ** (N10 - 1),
+                                      A2 - D8, N13)
         O16 = E11 / E5
         O18 = wake_outlet_expansion_ratio(A2, N10 + N13)
         O20 = G5
@@ -589,7 +616,8 @@ def blockMeshDirect_Custom(alpha, distance_to_inlet, distance_to_outlet,cell_siz
 
         H8 = E8 * F8 ** N10
         O10 = F8 ** N10
-        O13 = D11 / H8
+        O13 = _outer_ratio_continuous(_boundary_layer_first_cell(D8, F8, N10) * F8 ** (N10 - 1),
+                                      A2 - D8, N13)
         O16 = E11 / E5
         O18 = wake_outlet_expansion_ratio(A2, N10 + N13)
         O20 = G5

@@ -1072,7 +1072,8 @@ class App:
             nutilda_value = self.nutilda_var.get()
             nu_value_I = self.nu_var_I.get()
             standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_I)
-            standard_expansion_ratio = functions.expansion_ratio_for_flow(flow_speed, nu_value_I)
+            standard_expansion_ratio = functions.expansion_ratio_for_flow(
+                flow_speed, nu_value_I, target_yplus=self.yplus_var_I.get())
         elif self.simulation_tipo == "Compressible":
             flow_speed = self.flow_speed_var_c.get()
             Pressure = self.p_var_c.get()
@@ -1083,7 +1084,8 @@ class App:
             T_value = self.t_var.get()
             k_value = self.k_var.get()
             standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_c)
-            standard_expansion_ratio = functions.expansion_ratio_for_flow(flow_speed, nu_value_c)
+            standard_expansion_ratio = functions.expansion_ratio_for_flow(
+                flow_speed, nu_value_c, target_yplus=self.yplus_var_c.get())
 
         self._init_progress_state()
         self._log_event(f"Preparing {len(self.angles)} case(s): {', '.join(f'{a:g}°' for a in self.angles)}")
@@ -1967,12 +1969,14 @@ class App:
             preset["flow_incompressible"] = {
                 "velocity": self.flow_speed_var_I.get(), "p": self.p_var_I.get(),
                 "nut": self.nut_var.get(), "nutilda": self.nutilda_var.get(), "nu": self.nu_var_I.get(),
+                "yplus": self.yplus_var_I.get(),
             }
         if hasattr(self, "flow_speed_var_c"):
             preset["flow_compressible"] = {
                 "velocity": self.flow_speed_var_c.get(), "p": self.p_var_c.get(), "t": self.t_var.get(),
                 "alphat": self.alphat_var.get(), "k": self.k_var.get(), "nut": self.nut_var_c.get(),
                 "omega": self.omega_var.get(), "nu": self.nu_var_c.get(),
+                "yplus": self.yplus_var_c.get(),
             }
         return preset
 
@@ -2030,6 +2034,7 @@ class App:
                 self.nut_var = tk.DoubleVar(value=flow_i.get("nut", DEFAULT_NUT_NUTILDA))
                 self.nutilda_var = tk.DoubleVar(value=flow_i.get("nutilda", DEFAULT_NUT_NUTILDA))
                 self.nu_var_I = tk.DoubleVar(value=flow_i.get("nu", 1e-5))
+                self.yplus_var_I = tk.DoubleVar(value=flow_i.get("yplus", functions.DEFAULT_TARGET_YPLUS))
 
             flow_c = preset.get("flow_compressible")
             if flow_c:
@@ -2041,6 +2046,7 @@ class App:
                 self.nut_var_c = tk.DoubleVar(value=flow_c.get("nut", 0.1))
                 self.omega_var = tk.DoubleVar(value=flow_c.get("omega", 0.1))
                 self.nu_var_c = tk.DoubleVar(value=flow_c.get("nu", 1e-6))
+                self.yplus_var_c = tk.DoubleVar(value=flow_c.get("yplus", functions.DEFAULT_TARGET_YPLUS))
         except (TypeError, ValueError) as e:
             messagebox.showerror("Error:", f"Preset file is malformed: {e}")
             return
@@ -2251,11 +2257,13 @@ class App:
             self.nut_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
             self.nutilda_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
             self.nu_var_I = tk.DoubleVar(value=1e-5)
+            self.yplus_var_I = tk.DoubleVar(value=functions.DEFAULT_TARGET_YPLUS)
 
         self._flow_screen(
             "Incompressible Simulation", self.Simulation_Incompressible,
             self.flow_speed_var_I, self.nu_var_I, [],
-            [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var), ("Nutilda", self.nutilda_var)],
+            [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var), ("Nutilda", self.nutilda_var),
+             ("Wall y+ target", self.yplus_var_I)],
             adv_columns=4, reset_advanced=self.toggle_additional_fields_reset)
 
     def toggle_additional_fields_reset(self):
@@ -2263,6 +2271,7 @@ class App:
         self.nutilda_var.set(DEFAULT_NUT_NUTILDA)
         self.p_var_I.set(0.0)
         self.nu_var_I.set(1e-5)
+        self.yplus_var_I.set(functions.DEFAULT_TARGET_YPLUS)
 
     def Compressive_flow_variables_page(self):
         if not hasattr(self, "flow_speed_var_c"):
@@ -2274,13 +2283,14 @@ class App:
             self.nut_var_c = tk.DoubleVar(value=0.1)
             self.omega_var = tk.DoubleVar(value=0.1)
             self.nu_var_c = tk.DoubleVar(value=1e-6)
+            self.yplus_var_c = tk.DoubleVar(value=functions.DEFAULT_TARGET_YPLUS)
 
         self._flow_screen(
             "Compressible Simulation", self.simulation_Compressible,
             self.flow_speed_var_c, self.nu_var_c,
             [("P (pressure)", self.p_var_c), ("T (temperature K)", self.t_var)],
             [("Alphat", self.alphat_var), ("k", self.k_var), ("Nut", self.nut_var_c),
-             ("Omega", self.omega_var), ("Nu", self.nu_var_c)],
+             ("Omega", self.omega_var), ("Nu", self.nu_var_c), ("Wall y+ target", self.yplus_var_c)],
             adv_columns=3, reset_advanced=self.toggle_additional_fields_compressive_reset,
             temperature_var=self.t_var)
 
@@ -2291,6 +2301,7 @@ class App:
         self.nut_var_c.set(0.1)
         self.omega_var.set(0.1)
         self.nu_var_c.set(1e-6)
+        self.yplus_var_c.set(functions.DEFAULT_TARGET_YPLUS)
 
     # ------------------------------------------------------------------ #
     # Pós-processamento (lógica preservada)
