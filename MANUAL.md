@@ -110,8 +110,15 @@ adjust it — nothing has been simulated yet at this point. Otherwise, click
 | Flow velocity (m/s) | — | Required |
 | nu | `1e-5` | Kinematic viscosity |
 | P | `0.0` | Reference pressure |
-| Nut | `0.14` | Recommended: same order as `nu` |
-| Nutilda | `0.14` | Recommended: ~4× `nu` |
+| Nut | `5e-5` | Freestream eddy viscosity, ~5× `nu` |
+| Turbulence intensity (%) | `0.1` | Sets `k` for the k-ω SST model (`omega` follows from `k` and Nut) |
+| Wall y+ target | `33.41` | Average wall y+ the standard mesh is sized for |
+
+The incompressible case uses the **k-ω SST** turbulence model (it was Spalart-Allmaras
+before). In the NACA 0012 validation (Re = 6·10⁶, Ladson) the drag error at 0/5/10/15° went
+from 18/28/27/38 % to 3/12/14/34 % and all four angles converge (930–3,480 iterations);
+the lift error stayed at about 8 %. `k` and `omega` are convected with plain upwind: with second-order
+upwind the SST case diverged within a few dozen iterations.
 
 ### Compressible
 

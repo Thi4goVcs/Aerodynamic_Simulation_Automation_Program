@@ -30,7 +30,10 @@ divSchemes
 
     div(phi,U)      bounded Gauss linearUpwind grad(U);
 
-    div(phi,nuTilda) bounded Gauss linearUpwind grad(nuTilda);
+    // k and omega need plain upwind: with linearUpwind the k-omega SST case blew up (floating
+    // point exception) within ~60 iterations in every test.
+    div(phi,k)      bounded Gauss upwind;
+    div(phi,omega)  bounded Gauss upwind;
 
 }
 

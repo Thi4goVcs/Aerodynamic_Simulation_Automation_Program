@@ -37,6 +37,10 @@ import functions  # type: ignore
 # overprediction found during NACA 0012 literature validation.
 DEFAULT_NUT_NUTILDA = 5 * 1e-5
 
+# Freestream turbulence intensity (percent) for the k-omega SST model: a low-turbulence wind
+# tunnel / clean external flow. It sets k; omega follows from k and the eddy viscosity above.
+DEFAULT_TURBULENCE_INTENSITY_PCT = 0.1
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -85,6 +89,9 @@ WIZARD_STEPS = ["Setup", "Mesh", "Preview", "Type", "Flow", "Run", "Results"]
 # a hover tooltip next to its value -- otherwise the raw numbers (e.g. "Max
 # non-orthogonality: 88.32") give no sense of whether that's fine or a
 # problem.
+TU_HELP = ("Freestream turbulence intensity of the k-omega SST model, in percent. 0.1 is a clean, "
+           "low-turbulence flow (wind tunnel / free flight); it sets k, and omega follows from k and Nut.")
+
 YPLUS_HELP = ("Average wall y+ the standard mesh is sized for. The default (33.41) is the value validated "
               "against wind-tunnel data. Use ~1 to resolve the boundary layer down to the wall: it runs "
               "slower and, in our tests, did not improve the drag.")
@@ -1147,6 +1154,7 @@ class App:
             Pressure = self.p_var_I.get()
             nut_value = self.nut_var.get()
             nutilda_value = self.nutilda_var.get()
+            turbulence_intensity = self.tu_var_I.get() / 100.0
             nu_value_I = self.nu_var_I.get()
             standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_I)
             standard_expansion_ratio = functions.expansion_ratio_for_flow(
@@ -1214,7 +1222,8 @@ class App:
 
                 if self.simulation_tipo == "Incompressible":
                     functions.variables_incompressible(orig_directory_path, angle, flow_speed, Pressure,
-                                                         nut_value, nutilda_value, nu_value_I)
+                                                         nut_value, nutilda_value, nu_value_I,
+                                                         turbulence_intensity=turbulence_intensity)
                     functions.verify_initial_conditions(orig_directory_path, flow_speed)
                 elif self.simulation_tipo == "Compressible":
                     functions.variables_compressible(orig_directory_path, angle, flow_speed, Pressure,
@@ -2111,6 +2120,7 @@ class App:
             preset["flow_incompressible"] = {
                 "velocity": self.flow_speed_var_I.get(), "p": self.p_var_I.get(),
                 "nut": self.nut_var.get(), "nutilda": self.nutilda_var.get(), "nu": self.nu_var_I.get(),
+                "tu_pct": self.tu_var_I.get(),
                 "yplus": self.yplus_var_I.get(),
             }
         if hasattr(self, "flow_speed_var_c"):
@@ -2175,6 +2185,7 @@ class App:
                 self.p_var_I = tk.DoubleVar(value=flow_i.get("p", 0.0))
                 self.nut_var = tk.DoubleVar(value=flow_i.get("nut", DEFAULT_NUT_NUTILDA))
                 self.nutilda_var = tk.DoubleVar(value=flow_i.get("nutilda", DEFAULT_NUT_NUTILDA))
+                self.tu_var_I = tk.DoubleVar(value=flow_i.get("tu_pct", DEFAULT_TURBULENCE_INTENSITY_PCT))
                 self.nu_var_I = tk.DoubleVar(value=flow_i.get("nu", 1e-5))
                 self.yplus_var_I = tk.DoubleVar(value=flow_i.get("yplus", functions.DEFAULT_TARGET_YPLUS))
 
@@ -2404,19 +2415,22 @@ class App:
             self.p_var_I = tk.DoubleVar(value=0.0)
             self.nut_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
             self.nutilda_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
+            self.tu_var_I = tk.DoubleVar(value=DEFAULT_TURBULENCE_INTENSITY_PCT)
             self.nu_var_I = tk.DoubleVar(value=1e-5)
             self.yplus_var_I = tk.DoubleVar(value=functions.DEFAULT_TARGET_YPLUS)
 
         self._flow_screen(
             "Incompressible Simulation", self.Simulation_Incompressible,
             self.flow_speed_var_I, self.nu_var_I, [],
-            [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var), ("Nutilda", self.nutilda_var),
+            [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var),
+             ("Turbulence intensity (%)", self.tu_var_I, TU_HELP),
              ("Wall y+ target", self.yplus_var_I, YPLUS_HELP)],
             adv_columns=4, reset_advanced=self.toggle_additional_fields_reset)
 
     def toggle_additional_fields_reset(self):
         self.nut_var.set(DEFAULT_NUT_NUTILDA)  # Define valores padrão caso escondido
         self.nutilda_var.set(DEFAULT_NUT_NUTILDA)
+        self.tu_var_I.set(DEFAULT_TURBULENCE_INTENSITY_PCT)
         self.p_var_I.set(0.0)
         self.nu_var_I.set(1e-5)
         self.yplus_var_I.set(functions.DEFAULT_TARGET_YPLUS)

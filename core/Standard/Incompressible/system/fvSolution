@@ -33,7 +33,16 @@ solvers
         relTol          0.1;
     }
 
-    nuTilda
+    k
+    {
+        solver          smoothSolver;
+        smoother        GaussSeidel;
+        nSweeps         2;
+        tolerance       1e-08;
+        relTol          0.1;
+    }
+
+    omega
     {
         solver          smoothSolver;
         smoother        GaussSeidel;
@@ -60,7 +69,8 @@ relaxationFactors
     equations
     {
         U               0.7;
-        nuTilda         0.7;
+        k               0.7;
+        omega           0.7;
     }
 }
 

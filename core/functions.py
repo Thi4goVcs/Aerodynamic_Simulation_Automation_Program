@@ -988,7 +988,8 @@ def verify_initial_conditions(directory, expected_speed):
         raise ValueError(f"{directory}/initialConditions has U_mag {found}, expected {expected_speed}")
 
 
-def variables_incompressible(directory, angle, num_mech,p,nut_value,nutilda_value,nu_value_I):
+def variables_incompressible(directory, angle, num_mech,p,nut_value,nutilda_value,nu_value_I,
+                             turbulence_intensity=0.001):
     _refuse_template_dir(directory)
     # Converting the angle to radians
     angle_rad = math.radians(angle)
@@ -1029,6 +1030,12 @@ FoamFile
         fid.write('rhoInf 1.225;\n\n')
         fid.write(f'nut {nut_value};\n\n')
         fid.write(f'nuTilda {nutilda_value};\n\n')
+        # k-omega SST freestream values: k from the turbulence intensity, omega from k and the
+        # freestream eddy viscosity (nut = k/omega, i.e. the same viscosity ratio as before)
+        k_inlet = 1.5 * (turbulence_intensity * U) ** 2
+        omega_inlet = k_inlet / nut_value if nut_value else 1.0
+        fid.write(f'kInlet {k_inlet:.6g};\n\n')
+        fid.write(f'omegaInlet {omega_inlet:.6g};\n\n')
         fid.write(f'p {p};\n\n')
         fid.write(f'nu {nu_value_I};\n\n')
         fid.write('// ************************************************************************* //\n')

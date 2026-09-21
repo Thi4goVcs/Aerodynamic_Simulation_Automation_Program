@@ -36,6 +36,10 @@ nut 8.58e-6;
 
 nuTilda 3.42e-5;
 
+kInlet 0.0054;
+
+omegaInlet 108;
+
 p 0.0;
 
 nu 8.58e-6;
