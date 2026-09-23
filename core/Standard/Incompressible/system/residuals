@@ -14,7 +14,6 @@ Description
 
 #includeEtc "caseDicts/postProcessing/numerical/solverInfo.cfg"
 
-//fields (p U nut k omega);
-fields (p U nut nuTilda);
+fields (p U nut k omega);
 
 // ************************************************************************* //

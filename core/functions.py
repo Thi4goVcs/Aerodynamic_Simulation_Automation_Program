@@ -39,11 +39,15 @@ def naca4digit(m, p, t, c, num_points=102):
         # Calcule x usando a expressão dada
         x = (1 - np.cos(beta)) / 2
         # Inverter a distribuição para ter mais pontos no início
+        # -0.1036 (em vez do -0.1015 classico) fecha o bordo de fuga exatamente
+        # (soma dos coeficientes = 0, ver Ladson/NASA TMR): com -0.1015 o perfil
+        # fica aberto em ~0.0025c, e a malha (blockMeshDirect) fecha esse gap
+        # num unico vertice, criando um segmento quase vertical bem na ponta.
         yt = 5*t*c*(0.2969*np.sqrt(x/c) -
                     0.1260*(x/c) -
                     0.3516*(x/c)**2 +
                     0.2843*(x/c)**3 -
-                    0.1015*(x/c)**4)
+                    0.1036*(x/c)**4)
 
         if p == 0:
             yc = np.zeros_like(x)
@@ -1022,11 +1026,15 @@ FoamFile
         # Writing velocity components
         fid.write(f'U_mag {U};\n\n')
         fid.write(f'angle {angle};\n\n')
-        fid.write(f'U_x  {U*math.cos(angle_rad):.3f};\n\n')
-        fid.write(f'U_y  {U*math.sin(angle_rad):.3f};\n\n')
+        # Full precision: U_x/U_y (velocity) and sen_alpha/cos_alpha (liftDir/dragDir
+        # in system/forces) both encode the same angle and must stay aligned. Rounding
+        # U_x/U_y to 3 decimals and sen/cos to 4 used to leave them off by ~5e-5 rad,
+        # worth up to ~0.35% of Cd.
+        fid.write(f'U_x  {U*math.cos(angle_rad):.10f};\n\n')
+        fid.write(f'U_y  {U*math.sin(angle_rad):.10f};\n\n')
         fid.write('U_z 0;\n\n')
-        fid.write(f'sen_alpha {math.sin(angle_rad):.4f};\n\n')
-        fid.write(f'cos_alpha {math.cos(angle_rad):.4f};\n\n')
+        fid.write(f'sen_alpha {math.sin(angle_rad):.12f};\n\n')
+        fid.write(f'cos_alpha {math.cos(angle_rad):.12f};\n\n')
         fid.write('rhoInf 1.225;\n\n')
         fid.write(f'nut {nut_value};\n\n')
         fid.write(f'nuTilda {nutilda_value};\n\n')
@@ -1074,11 +1082,14 @@ FoamFile
 
         # Writing velocity components
         fid.write(f'U_mag {U};\n')
-        fid.write(f'U_x  {U * math.cos(angle_rad):.3f};\n\n')
-        fid.write(f'U_y  {U * math.sin(angle_rad):.3f};\n\n')
+        # Full precision, same reasoning as variables_incompressible: U_x/U_y and
+        # sen_alpha/cos_alpha encode the same angle for two different consumers
+        # (the velocity field and liftDir/dragDir in system/forces) and must agree.
+        fid.write(f'U_x  {U * math.cos(angle_rad):.10f};\n\n')
+        fid.write(f'U_y  {U * math.sin(angle_rad):.10f};\n\n')
         fid.write('U_z 0;\n\n')
-        fid.write(f'sen_alpha {math.sin(angle_rad)};\n\n')
-        fid.write(f'cos_alpha {math.cos(angle_rad)};\n\n')
+        fid.write(f'sen_alpha {math.sin(angle_rad):.12f};\n\n')
+        fid.write(f'cos_alpha {math.cos(angle_rad):.12f};\n\n')
         fid.write('rhoInf 1.225;\n\n')
         fid.write(f'nut {nut_value};\n\n')
         fid.write(f'P {p};\n\n')
@@ -1197,6 +1208,32 @@ def stage_from_logs(stages):
     return "preparing"
 
 
+def summarize_run_failure(case_dir):
+    """Short, human reason a case failed, read from whichever OpenFOAM log got the
+    farthest (run_commands_in_wsl only copies logs back on failure). None if no
+    log made it back (e.g. WSL itself could not be reached)."""
+    for name in ("reconstructPar", "simpleFoam", "rhoSimpleFoam", "decomposePar", "blockMesh"):
+        path = os.path.join(case_dir, f"log.{name}")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if "Floating point exception" in text or "sigFpe::sigHandler" in text:
+            return f"{name}: solver diverged (floating point exception)"
+        if "FOAM FATAL" in text:
+            i = text.rfind("FOAM FATAL")
+            lines = [l.strip() for l in text[i:i + 400].splitlines() if l.strip()]
+            detail = lines[1] if len(lines) > 1 else "fatal error"
+            return f"{name}: {detail}"
+        if "mpirun noticed" in text or "MPI_ABORT" in text:
+            return f"{name}: solver process crashed (MPI abort)"
+        return f"{name}: stopped without finishing"
+    return None
+
+
 def read_case_iteration_settings(control_dict_path):
     """(delta_t, max_iterations) from a case's controlDict, or None. For a
     steady simpleFoam case the 'time' is just iteration * deltaT."""
@@ -1267,20 +1304,41 @@ def format_duration(seconds):
     return f"{hours} h {minutes:02d} min"
 
 
-def summarize_coefficient_history(coefficient_path, avg_fraction=0.2, min_avg_rows=5):
+def summarize_coefficient_history(coefficient_path, max_time=None, slope_window=0.5,
+                                   report_window=0.1, min_rows=5):
     """
-    Read an OpenFOAM forceCoeffs time history (coefficient.dat) and average
-    the last portion of it instead of just taking the final sample, which
-    can still carry solver oscillation/noise even after a long run.
+    Read an OpenFOAM forceCoeffs time history (coefficient.dat).
+
+    `max_time` is the case's iteration ceiling in the same units as the first
+    column (max_iterations * deltaT -- see read_case_iteration_settings). When
+    given, "converged" is simply "the run stopped meaningfully before that
+    ceiling": now that a crashed/killed solver is reported as a failure rather
+    than silently reaching reconstructPar (see summarize_run_failure), that can
+    only mean OpenFOAM's own runTimeControl condition in system/forces actually
+    fired. That is far more reliable than re-deriving the same decision from
+    the coefficient series in Python: the real windowed-average function
+    object doesn't stumble on a coefficient that's already near zero (Cl at 0
+    deg), but a from-scratch slope reconstruction does. Without `max_time`
+    (e.g. no controlDict to read), falls back to that rougher slope check.
+
+    `slope_window` and `report_window` are spans of the first column (Time,
+    i.e. iteration * deltaT for a steady solver) rather than row counts, so
+    this keeps working if writeInterval or deltaT change.
 
     Returns None if the file is missing/empty, otherwise a dict with:
         last_time   -- the final time/iteration value reached
         averaged    -- list of 12 floats (Cd, Cd(f), Cd(r), Cl, Cl(f), Cl(r),
-                        CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r)) averaged
-                        over the last `avg_fraction` of the run
-        converged   -- True if Cd and Cl look flat over the averaging window
-                        (first half vs second half differ by < 2%)
-        rel_change  -- the relative change behind that convergence check
+                        CmPitch, CmRoll, CmYaw, Cs, Cs(f), Cs(r)): the mean over
+                        the short `report_window`, which tracks a still-moving
+                        Cd/Cl without the lag a long average would add -- unless
+                        that short window itself looks oscillatory (its scatter
+                        is bigger than its net drift, e.g. near stall), where a
+                        short average would just report noise and the mean
+                        widens to the last 20% of the run instead
+        converged   -- see above
+        rel_change  -- how much Cd/Cl still moved over `slope_window`, for a
+                        diagnostic message -- not what decides `converged` when
+                        `max_time` is available
     """
     try:
         df = pd.read_csv(coefficient_path, comment='#', sep=r'\s+', header=None)
@@ -1290,31 +1348,37 @@ def summarize_coefficient_history(coefficient_path, avg_fraction=0.2, min_avg_ro
         return None
 
     n = len(df)
-    window = min(n, max(min_avg_rows, int(n * avg_fraction)))
-    tail = df.tail(window)
-
     last_time = df.iloc[-1, 0]
-    averaged = tail.iloc[:, 1:].mean().tolist()
+    primary_cols = [1, 4]  # Cd, Cl
 
-    # Judge convergence on Cd (col 1) and Cl (col 4) only. The moment and
-    # side-force coefficients are routinely near-zero for a symmetric 2D
-    # case, where tiny absolute noise produces a huge, meaningless relative
-    # swing that would otherwise dominate the check.
-    half = max(1, window // 2)
-    primary_cols = [1, 4]
-    first_half_mean = tail.iloc[:half, primary_cols].mean()
-    second_half_mean = tail.iloc[-half:, primary_cols].mean()
-    # A coefficient counts as converged if it changed by < 2% relative, OR by
-    # less than an absolute tolerance -- near a zero crossing (Cl at 0 deg) a
-    # tiny, physically negligible wobble would otherwise read as a huge
-    # relative percentage. The absolute tolerance has to be per coefficient: Cd
-    # is ~0.01, so the 2e-3 that suits Cl would accept a 20% Cd drift as
-    # "converged". These match the stop criterion in system/forces
-    # (convergenciaCoeficientes), which is also absolute per coefficient.
-    abs_tolerance = pd.Series({1: 1e-4, 4: 2e-3})
+    def window_rows(span):
+        rows = df[df.iloc[:, 0] >= last_time - span]
+        return rows if len(rows) >= min_rows else df.tail(min(n, min_rows))
+
+    # Rough slope over the stop criterion's own window, for the diagnostic
+    # message and as a fallback "converged" signal when max_time is unknown.
+    # The moment and side-force coefficients are left out: they're routinely
+    # near-zero for a symmetric 2D case, where tiny absolute noise produces a
+    # huge, meaningless relative swing that would otherwise dominate the check.
+    slope_rows = window_rows(slope_window)
+    half = max(1, len(slope_rows) // 2)
+    first_half_mean = slope_rows.iloc[:half, primary_cols].mean()
+    second_half_mean = slope_rows.iloc[-half:, primary_cols].mean()
+    abs_tolerance = pd.Series({1: 1e-5, 4: 1e-4})
     abs_change = (second_half_mean - first_half_mean).abs()
     rel_change = abs_change / second_half_mean.abs().clip(lower=abs_tolerance)
-    converged = bool(((rel_change < 0.02) | (abs_change < abs_tolerance)).all())
+
+    if max_time:
+        converged = bool(last_time < max_time * 0.99)
+    else:
+        converged = bool(((rel_change < 0.001) | (abs_change < abs_tolerance)).all())
+
+    report_rows = window_rows(report_window)
+    report_std = report_rows.iloc[:, primary_cols].std().fillna(0.0)
+    report_drift = (report_rows.iloc[-1, primary_cols] - report_rows.iloc[0, primary_cols]).abs()
+    oscillating = bool((report_std > report_drift.clip(lower=1e-9)).any())
+    long_rows = df.tail(min(n, max(min_rows, int(n * 0.2))))
+    averaged = (long_rows if oscillating else report_rows).iloc[:, 1:].mean().tolist()
 
     return {
         "last_time": last_time,

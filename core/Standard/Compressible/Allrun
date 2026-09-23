@@ -22,17 +22,20 @@ then
 
     runApplication decomposePar
 
-    runParallel $(getApplication)
+    # runParallel on its own does not stop the script when the solver diverges
+    # or is killed -- Allrun would fall through to reconstructPar and exit 0,
+    # so the app would log a crashed run as finished successfully.
+    runParallel $(getApplication) || exit 1
 
     runApplication reconstructPar
-   
+
     #runApplication foamMonitor postProcessing/forceCoeffs/0/coefficient.dat
-   
+
 
 else
 
-    
-    runApplication $(getApplication)
+
+    runApplication $(getApplication) || exit 1
 
 fi
 

@@ -28,14 +28,16 @@ os.chdir(APP_DIR)
 sys.path.insert(0, os.path.join(APP_DIR, "core"))
 import functions  # type: ignore
 
-# Freestream nut/nuTilda default for the SA turbulence model: turbulent-viscosity
-# ratio (nut/nu) of 5, the standard "fully turbulent, low ambient turbulence"
-# setting recommended for external-aero SA cases. The old hardcoded default
-# (0.14, independent of nu) gave a ratio of ~14,000 at nu=1e-5 -- several
-# orders of magnitude too high -- which flooded the whole domain with
-# non-physical eddy viscosity and was the main cause of the ~2x-6x drag
-# overprediction found during NACA 0012 literature validation.
-DEFAULT_NUT_NUTILDA = 5 * 1e-5
+# Freestream turbulent-viscosity ratio (nut/nu) for the "Nut" field: 5 is the
+# standard "fully turbulent, low ambient turbulence" setting recommended for
+# external aero. This used to be a fixed absolute value (5 * 1e-5), correct
+# only at nu=1e-5 -- change nu without also touching Nut and the ratio drifts
+# silently (50 at nu=1e-6), the same class of bug as the old nut=0.14 default
+# (a ratio of ~14,000, several orders of magnitude too high, the main cause of
+# the ~2x-6x drag overprediction found during NACA 0012 literature
+# validation). Storing the ratio and multiplying by nu when the case is
+# written (execute_mesh_operations) keeps it correct for any nu.
+DEFAULT_NUT_RATIO = 5
 
 # Freestream turbulence intensity (percent) for the k-omega SST model: a low-turbulence wind
 # tunnel / clean external flow. It sets k; omega follows from k and the eddy viscosity above.
@@ -91,6 +93,10 @@ WIZARD_STEPS = ["Setup", "Mesh", "Preview", "Type", "Flow", "Run", "Results"]
 # problem.
 TU_HELP = ("Freestream turbulence intensity of the k-omega SST model, in percent. 0.1 is a clean, "
            "low-turbulence flow (wind tunnel / free flight); it sets k, and omega follows from k and Nut.")
+
+NUT_RATIO_HELP = ("Freestream eddy-viscosity ratio (Nut / nu), not an absolute value -- the actual Nut "
+                   "written to the case is this ratio times nu, so it stays correct if nu changes. 5 is "
+                   "the standard 'fully turbulent, low ambient turbulence' setting for external aero.")
 
 YPLUS_HELP = ("Average wall y+ the standard mesh is sized for. The default (33.41) is the value validated "
               "against wind-tunnel data. Use ~1 to resolve the boundary layer down to the wall: it runs "
@@ -1039,10 +1045,17 @@ class App:
             # Gerar pontos do perfil aerodinâmico
             xu, yu, xl, yl = functions.naca4digit(m, p, t, 1.0, num_points)
 
+            # blockMeshDirect already places the trailing/leading edge at the exact
+            # mesh vertices (1,0,0) and (0,0,0) -- writing those same endpoints here
+            # (x=0 and x=1) would duplicate them in the spline point list itself,
+            # creating a zero-length segment right where curvature is highest (both
+            # the upper and lower loops would start/end at (0,0)). Only the interior
+            # points are written, same split blockMeshDirect already expects (half
+            # the rows on each surface).
             with open('coordenadas.dat', 'w') as f:
-                for i in range(num_points):
+                for i in range(1, num_points - 1):
                     f.write("{:.6f} {:.6f}\n".format(xu[i], yu[i]))
-                for i in range(num_points - 1, -1, -1):
+                for i in range(num_points - 2, 0, -1):
                     f.write("{:.6f} {:.6f}\n".format(xl[i], yl[i]))
 
         elif self.airfoil == "airfoil_custom":
@@ -1060,9 +1073,34 @@ class App:
                 self.main_menu()
                 return False
 
+            # A consecutive exact duplicate (a Selig .dat sometimes lists the
+            # leading edge twice: once ending the upper surface, once starting the
+            # lower) creates a zero-length spline segment right where curvature is
+            # highest -- the same defect the NACA generator above just avoided.
+            deduped = [(x[0], y[0])] if x else []
+            for xi, yi in zip(x[1:], y[1:]):
+                if (xi, yi) != deduped[-1]:
+                    deduped.append((xi, yi))
+            if len(deduped) != len(x):
+                print(f"Note: removed {len(x) - len(deduped)} duplicate point(s) from {file_path}")
+            if deduped:
+                x, y = map(list, zip(*deduped))
+
             with open("coordenadas.dat", "w") as file:
                 for i in range(len(x)):
                     file.write(f"{x[i]} {y[i]}\n")
+
+            # Selig-style files start and end at the trailing edge (upper surface
+            # then lower surface); if those two points don't meet, the mesh will
+            # pinch the gap into a single vertex, same as the open-TE NACA case.
+            if len(x) > 1:
+                max_x = max(x)
+                if (abs(x[0] - max_x) < 1e-6 and abs(x[-1] - max_x) < 1e-6
+                        and abs(y[0] - y[-1]) > 1e-6):
+                    print(f"Warning: {file_path} has an open trailing edge "
+                          f"(first point {x[0]:.6f} {y[0]:.6f}, last point {x[-1]:.6f} {y[-1]:.6f}). "
+                          "The mesh closes this gap into a single vertex, which can distort the "
+                          "cells right at the trailing edge.")
 
         return True
 
@@ -1152,10 +1190,12 @@ class App:
         if self.simulation_tipo == "Incompressible":
             flow_speed = self.flow_speed_var_I.get()
             Pressure = self.p_var_I.get()
-            nut_value = self.nut_var.get()
-            nutilda_value = self.nutilda_var.get()
-            turbulence_intensity = self.tu_var_I.get() / 100.0
             nu_value_I = self.nu_var_I.get()
+            # "Nut ratio" is nut/nu, not an absolute value -- multiply by the actual nu here so
+            # it stays correct however the user sets nu, instead of a value baked in for nu=1e-5.
+            nut_value = self.nut_var.get() * nu_value_I
+            nutilda_value = self.nutilda_var.get() * nu_value_I
+            turbulence_intensity = self.tu_var_I.get() / 100.0
             standard_first_layer = functions.first_layer_thickness_for_flow(flow_speed, nu_value_I)
             standard_expansion_ratio = functions.expansion_ratio_for_flow(
                 flow_speed, nu_value_I, target_yplus=self.yplus_var_I.get())
@@ -1600,8 +1640,12 @@ class App:
         st["ended_at"] = now
         st["stage"] = "done" if success else "failed"
         took = functions.format_duration(now - st["started_at"]) if st["started_at"] else "?"
-        self._log_event(f"{angle:g}°: {'finished' if success else 'FAILED'} after {took}"
-                        + ("" if success else " — see the console output for details"))
+        detail = ""
+        if not success:
+            case_dir = os.path.join(APP_DIR, "Simulations", f"Angle_{angle}")
+            reason = functions.summarize_run_failure(case_dir)
+            detail = f" — {reason}" if reason else " — see the console output for details"
+        self._log_event(f"{angle:g}°: {'finished' if success else 'FAILED'} after {took}{detail}")
         self._refresh_progress_view()
 
     def _refresh_progress_view(self):
@@ -2183,8 +2227,10 @@ class App:
             if flow_i:
                 self.flow_speed_var_I = tk.DoubleVar(value=flow_i.get("velocity", 0.0))
                 self.p_var_I = tk.DoubleVar(value=flow_i.get("p", 0.0))
-                self.nut_var = tk.DoubleVar(value=flow_i.get("nut", DEFAULT_NUT_NUTILDA))
-                self.nutilda_var = tk.DoubleVar(value=flow_i.get("nutilda", DEFAULT_NUT_NUTILDA))
+                # Presets saved before this field became a ratio (nut/nu) stored an
+                # absolute nut value here; loading one just re-enters "Nut ratio" defaults.
+                self.nut_var = tk.DoubleVar(value=flow_i.get("nut", DEFAULT_NUT_RATIO))
+                self.nutilda_var = tk.DoubleVar(value=flow_i.get("nutilda", DEFAULT_NUT_RATIO))
                 self.tu_var_I = tk.DoubleVar(value=flow_i.get("tu_pct", DEFAULT_TURBULENCE_INTENSITY_PCT))
                 self.nu_var_I = tk.DoubleVar(value=flow_i.get("nu", 1e-5))
                 self.yplus_var_I = tk.DoubleVar(value=flow_i.get("yplus", functions.DEFAULT_TARGET_YPLUS))
@@ -2266,6 +2312,9 @@ class App:
             f'sim_exit=$?; '
             f'rm -rf "{unix_path}/postProcessing"; '
             f'cp -r "{wsl_work_dir}/postProcessing" "{unix_path}/" 2>/dev/null; '
+            # On failure, also bring back whatever OpenFOAM logs exist -- otherwise the only
+            # trace of why a case crashed was WSL's own stdout, invisible in the packaged app.
+            f'if [ $sim_exit -ne 0 ]; then cp "{wsl_work_dir}"/log.* "{unix_path}/" 2>/dev/null; fi; '
             f'rm -rf "{wsl_work_dir}"; '
             f'exit $sim_exit'
         )
@@ -2413,8 +2462,8 @@ class App:
         if not hasattr(self, "flow_speed_var_I"):
             self.flow_speed_var_I = tk.DoubleVar()
             self.p_var_I = tk.DoubleVar(value=0.0)
-            self.nut_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
-            self.nutilda_var = tk.DoubleVar(value=DEFAULT_NUT_NUTILDA)
+            self.nut_var = tk.DoubleVar(value=DEFAULT_NUT_RATIO)
+            self.nutilda_var = tk.DoubleVar(value=DEFAULT_NUT_RATIO)
             self.tu_var_I = tk.DoubleVar(value=DEFAULT_TURBULENCE_INTENSITY_PCT)
             self.nu_var_I = tk.DoubleVar(value=1e-5)
             self.yplus_var_I = tk.DoubleVar(value=functions.DEFAULT_TARGET_YPLUS)
@@ -2422,14 +2471,15 @@ class App:
         self._flow_screen(
             "Incompressible Simulation", self.Simulation_Incompressible,
             self.flow_speed_var_I, self.nu_var_I, [],
-            [("nu", self.nu_var_I), ("P", self.p_var_I), ("Nut", self.nut_var),
+            [("nu", self.nu_var_I), ("P", self.p_var_I),
+             ("Nut ratio (x nu)", self.nut_var, NUT_RATIO_HELP),
              ("Turbulence intensity (%)", self.tu_var_I, TU_HELP),
              ("Wall y+ target", self.yplus_var_I, YPLUS_HELP)],
             adv_columns=4, reset_advanced=self.toggle_additional_fields_reset)
 
     def toggle_additional_fields_reset(self):
-        self.nut_var.set(DEFAULT_NUT_NUTILDA)  # Define valores padrão caso escondido
-        self.nutilda_var.set(DEFAULT_NUT_NUTILDA)
+        self.nut_var.set(DEFAULT_NUT_RATIO)  # Define valores padrão caso escondido
+        self.nutilda_var.set(DEFAULT_NUT_RATIO)
         self.tu_var_I.set(DEFAULT_TURBULENCE_INTENSITY_PCT)
         self.p_var_I.set(0.0)
         self.nu_var_I.set(1e-5)
@@ -2496,7 +2546,10 @@ class App:
                 coefficient_path = os.path.join(angle_directory_path, "postProcessing", "forceCoeffs", "0", "coefficient.dat")
                 yplus_path = os.path.join(angle_directory_path, "postProcessing", "yPlus", "0", "yPlus.dat")
 
-                summary = functions.summarize_coefficient_history(coefficient_path)
+                settings = functions.read_case_iteration_settings(
+                    os.path.join(angle_directory_path, "system", "controlDict"))
+                max_time = settings[0] * settings[1] if settings and settings[0] and settings[1] else None
+                summary = functions.summarize_coefficient_history(coefficient_path, max_time=max_time)
                 if summary is None:
                     print(f"Warning: no results found for angle {angle} ({coefficient_path})")
                     results_file.write("\t".join(["nan"] * num_result_columns) + "\n")
